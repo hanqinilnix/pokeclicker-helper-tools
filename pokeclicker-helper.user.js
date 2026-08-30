@@ -23,8 +23,6 @@
     'use strict';
 
     /* ===================== core           ===================== */
-// Shared constants, state and helpers. Loaded first.
-
     // Battle.clickAttack drops anything inside 50ms.
     const CLICK_INTERVAL_MS = 50;
     // Movement is not rate-limited; this only keeps a run watchable.
@@ -188,8 +186,6 @@
     };
 
     /* ===================== panel          ===================== */
-// The Helper card, and the row modules register their toggles into.
-
     // ---------------------------------------------------------------------
     // Panel
     // ---------------------------------------------------------------------
@@ -399,8 +395,6 @@
     };
 
     /* ===================== auto-clicker   ===================== */
-// Click attacks wherever the game exposes one.
-
     // ---------------------------------------------------------------------
     // Auto clicker
     // ---------------------------------------------------------------------
@@ -440,8 +434,6 @@
         (isOn) => { isClickerRunning = isOn; });
 
     /* ===================== frontier-restart ===================== */
-// Restarts a Battle Frontier run after a loss.
-
     // ---------------------------------------------------------------------
     // Battle Frontier auto restart
     // ---------------------------------------------------------------------
@@ -466,8 +458,6 @@
         (isOn) => { isFrontierRestartRunning = isOn; });
 
     /* ===================== crawler        ===================== */
-// Dungeon crawling: targets, pathfinding, run accounting, and its card.
-
     // ---------------------------------------------------------------------
     // Dungeon crawler
     // ---------------------------------------------------------------------
@@ -993,8 +983,6 @@
     }
 
     /* ===================== hatchery       ===================== */
-// Filling the hatchery and queue, and its controls in the breeding modal.
-
     // ---------------------------------------------------------------------
     // Hatchery fill
     // ---------------------------------------------------------------------
@@ -1162,8 +1150,6 @@
     };
 
     /* ===================== bulk-selling   ===================== */
-// Selling every Underground item of a value type at once.
-
     // ---------------------------------------------------------------------
     // Underground bulk selling
     // ---------------------------------------------------------------------
@@ -1231,8 +1217,6 @@
     };
 
     /* ===================== boot           ===================== */
-// Hotkeys, timers and start-up. Loaded last.
-
     // ---------------------------------------------------------------------
     // Wiring
     // ---------------------------------------------------------------------

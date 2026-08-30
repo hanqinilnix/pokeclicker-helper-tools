@@ -50,7 +50,9 @@ const build = () => {
         // Each module opens with a plain top-of-file comment describing it; that
         // is for readers of the module, not of the bundle, so it is dropped and
         // replaced with a banner.
-        const withoutFileComment = source.replace(/^(\/\/[^\n]*\n)+\n/, '');
+        // \r? matters: without it a CRLF checkout keeps the comment and the bundle
+        // stops matching a fresh build.
+        const withoutFileComment = source.replace(/^(\/\/[^\n]*\r?\n)+\r?\n/, '');
         return banner(name) + withoutFileComment.replace(/\n+$/, '') + '\n';
     }).join('\n');
 

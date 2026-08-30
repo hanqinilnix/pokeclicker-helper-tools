@@ -1,0 +1,3 @@
+# build.js writes LF, so a CRLF checkout makes the committed bundle differ from
+# a fresh build and `node build.js --check` fails on a clean clone.
+* text=auto eol=lf
