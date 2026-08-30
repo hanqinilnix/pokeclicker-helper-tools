@@ -1,0 +1,21 @@
+// ==UserScript==
+// @name         PokeClicker Helper
+// @namespace    https://github.com/hanqinilnix/pokeclicker-helper-tools
+// @version      1.0.0
+// @description  Dungeon crawler, auto clicker and hatchery filler for PokeClicker
+// @match        https://www.pokeclicker.com/*
+// @match        https://pokeclicker.com/*
+// @grant        none
+// @run-at       document-idle
+// @downloadURL  https://raw.githubusercontent.com/hanqinilnix/pokeclicker-helper-tools/main/pokeclicker-helper.user.js
+// @updateURL    https://raw.githubusercontent.com/hanqinilnix/pokeclicker-helper-tools/main/pokeclicker-helper.user.js
+// ==/UserScript==
+// Updates are detected by comparing @version, so bump it on every push or the
+// manager will keep the copy it already has.
+
+// The game compiles to a single classic script, so its classes (DungeonRunner,
+// DungeonMap, Battle, ...) live in the global lexical scope rather than on
+// `window`. Bare identifiers resolve; `window.DungeonRunner` does not. This is
+// why `@grant none` is required: any GM_* grant moves the script into a sandbox
+// where those bare lookups fail, and `unsafeWindow` cannot reach them either.
+

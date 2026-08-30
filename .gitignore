@@ -1,0 +1,12 @@
+# PokeClicker save exports. These are full game saves — publishing one lets
+# anyone load your progress — so they stay out of the repository.
+# The brackets are escaped: unescaped, [v...] is a character class, not a literal.
+\[v*\] PokeClicker *.txt
+*PokeClicker*.txt
+
+node_modules/
+
+# Python leftovers, in case the old Selenium tooling is ever revived here
+.venv/
+__pycache__/
+*.pyc
