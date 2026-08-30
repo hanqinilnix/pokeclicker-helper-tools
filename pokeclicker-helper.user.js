@@ -165,6 +165,28 @@
         }
     };
 
+    // A covered window throttles main-thread timers about tenfold; worker timers
+    // are exempt, which is how Game.ts keeps its own tick rate. Falls back to
+    // setInterval where Worker is unavailable.
+    const startTicks = (ticks) => {
+        const handlers = ticks.map((tick) => guardedTick(tick.label, tick.run));
+
+        if (typeof Worker !== 'undefined') {
+            try {
+                const source = 'onmessage=(e)=>e.data.forEach((ms,i)=>setInterval(()=>postMessage(i),ms))';
+                const worker = new Worker(URL.createObjectURL(new Blob([source])));
+                worker.onmessage = (event) => handlers[event.data]();
+                worker.postMessage(ticks.map((tick) => tick.interval));
+                return 'worker';
+            } catch (error) {
+                console.error('[helper] worker timers unavailable:', error);
+            }
+        }
+
+        ticks.forEach((tick, index) => setInterval(handlers[index], tick.interval));
+        return 'setInterval';
+    };
+
     /* ===================== panel          ===================== */
 // The Helper card, and the row modules register their toggles into.
 
@@ -1266,13 +1288,15 @@
         patchDungeonLeave();
         DungeonRunner.dungeonFinished.subscribe(guardedTick('dungeon finished', handleDungeonFinished));
 
-        setInterval(guardedTick('auto clicker', clickerTick), CLICK_INTERVAL_MS);
-        setInterval(guardedTick('dungeon crawler', crawlerTick), CRAWLER_INTERVAL_MS);
-        setInterval(guardedTick('panel refresh', refreshPanel), PANEL_REFRESH_INTERVAL_MS);
-        setInterval(guardedTick('hatchery auto-fill', hatcheryAutoFillTick), HATCHERY_AUTO_FILL_INTERVAL_MS);
+        const tickSource = startTicks([
+            { label: 'auto clicker', interval: CLICK_INTERVAL_MS, run: clickerTick },
+            { label: 'dungeon crawler', interval: CRAWLER_INTERVAL_MS, run: crawlerTick },
+            { label: 'panel refresh', interval: PANEL_REFRESH_INTERVAL_MS, run: refreshPanel },
+            { label: 'hatchery auto-fill', interval: HATCHERY_AUTO_FILL_INTERVAL_MS, run: hatcheryAutoFillTick },
+        ]);
         document.addEventListener('keydown', guardedTick('hotkey', handleKeyDown));
 
-        console.log('[helper] ready'
+        console.log(`[helper] ready (${tickSource} timers)`
             + `\n  ${CRAWLER_TOGGLE_KEY.toUpperCase()} — start/stop dungeon crawler`
             + `\n  ${CLICKER_TOGGLE_KEY.toUpperCase()} — toggle auto clicker`
             + `\n  ${FILL_HATCHERY_KEY.toUpperCase()} — fill the hatchery and queue`);

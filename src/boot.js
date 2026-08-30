@@ -55,13 +55,15 @@
         patchDungeonLeave();
         DungeonRunner.dungeonFinished.subscribe(guardedTick('dungeon finished', handleDungeonFinished));
 
-        setInterval(guardedTick('auto clicker', clickerTick), CLICK_INTERVAL_MS);
-        setInterval(guardedTick('dungeon crawler', crawlerTick), CRAWLER_INTERVAL_MS);
-        setInterval(guardedTick('panel refresh', refreshPanel), PANEL_REFRESH_INTERVAL_MS);
-        setInterval(guardedTick('hatchery auto-fill', hatcheryAutoFillTick), HATCHERY_AUTO_FILL_INTERVAL_MS);
+        const tickSource = startTicks([
+            { label: 'auto clicker', interval: CLICK_INTERVAL_MS, run: clickerTick },
+            { label: 'dungeon crawler', interval: CRAWLER_INTERVAL_MS, run: crawlerTick },
+            { label: 'panel refresh', interval: PANEL_REFRESH_INTERVAL_MS, run: refreshPanel },
+            { label: 'hatchery auto-fill', interval: HATCHERY_AUTO_FILL_INTERVAL_MS, run: hatcheryAutoFillTick },
+        ]);
         document.addEventListener('keydown', guardedTick('hotkey', handleKeyDown));
 
-        console.log('[helper] ready'
+        console.log(`[helper] ready (${tickSource} timers)`
             + `\n  ${CRAWLER_TOGGLE_KEY.toUpperCase()} — start/stop dungeon crawler`
             + `\n  ${CLICKER_TOGGLE_KEY.toUpperCase()} — toggle auto clicker`
             + `\n  ${FILL_HATCHERY_KEY.toUpperCase()} — fill the hatchery and queue`);

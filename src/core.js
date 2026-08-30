@@ -139,3 +139,25 @@
             console.error(`[helper] ${label} failed:`, error);
         }
     };
+
+    // A covered window throttles main-thread timers about tenfold; worker timers
+    // are exempt, which is how Game.ts keeps its own tick rate. Falls back to
+    // setInterval where Worker is unavailable.
+    const startTicks = (ticks) => {
+        const handlers = ticks.map((tick) => guardedTick(tick.label, tick.run));
+
+        if (typeof Worker !== 'undefined') {
+            try {
+                const source = 'onmessage=(e)=>e.data.forEach((ms,i)=>setInterval(()=>postMessage(i),ms))';
+                const worker = new Worker(URL.createObjectURL(new Blob([source])));
+                worker.onmessage = (event) => handlers[event.data]();
+                worker.postMessage(ticks.map((tick) => tick.interval));
+                return 'worker';
+            } catch (error) {
+                console.error('[helper] worker timers unavailable:', error);
+            }
+        }
+
+        ticks.forEach((tick, index) => setInterval(handlers[index], tick.interval));
+        return 'setInterval';
+    };
