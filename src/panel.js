@@ -56,43 +56,85 @@
         return { panel, body };
     };
 
-    // Modules register their own switch; registration order is display order.
+    // Modules register their own cell; registration order is left to right.
     const panelToggles = [];
 
-    const contributeToggle = (elementId, labelText, isOn, setOn) => {
-        panelToggles.push({ elementId, labelText, isOn, setOn, input: null });
+    const contributeToggle = (elementId, labelText, description, isOn, setOn) => {
+        panelToggles.push({ elementId, labelText, description, isOn, setOn, cell: null });
     };
+
+    // Bootstrap prefers a title attribute over the option, so it is only a fallback.
+    const attachTooltip = (element, title, placement) => {
+        if (typeof $ === 'function' && typeof $(element).tooltip === 'function') {
+            $(element).tooltip({ title, trigger: 'hover', placement, html: true, boundary: 'window', animation: false });
+        } else {
+            element.title = title.replace(/<br>/g, '\n');
+        }
+    };
+
+    // Built from the key constants, so it cannot drift from the handler.
+    const helpTooltip = () => [
+        `${CRAWLER_TOGGLE_KEY.toUpperCase()} - start/stop dungeon crawler`,
+        `${SAFARI_TOGGLE_KEY.toUpperCase()} - start/stop auto safari (in the Safari Zone)`,
+        `${CLICKER_TOGGLE_KEY.toUpperCase()} - toggle auto clicker`,
+        `${FILL_HATCHERY_KEY.toUpperCase()} - fill the hatchery and queue`,
+    ].join('<br>');
 
     const buildPanel = () => {
         const { panel, body } = buildCard(PANEL_ID, PANEL_BODY_ID, 'Helper', 'sortable');
+        // Flush like the Poke Balls card, so the cells reach the card edges.
+        body.classList.remove('p-2');
+        body.classList.add('p-0');
 
-        // A pair needs ~320px; flex-wrap covers a narrower host.
-        const togglesRow = buildRow();
-        togglesRow.classList.add('flex-wrap');
-        togglesRow.style.gap = '0.75rem';
+        // Copied off the Poke Balls card's "?" button, styles and all.
+        const helpButton = buildElement('button', 'btn btn-info', '?');
+        helpButton.type = 'button';
+        helpButton.id = 'helperHelpButton';
+        Object.assign(helpButton.style, {
+            position: 'absolute', right: '0px', top: '0px', width: 'auto', height: '41px', padding: '4px',
+        });
+        attachTooltip(helpButton, helpTooltip(), 'left');
+        panel.insertBefore(helpButton, body);
 
-        panelToggles.forEach((toggle) => {
-            const builtSwitch = buildSwitch(toggle.elementId, toggle.labelText);
-            builtSwitch.input.addEventListener('change', () => {
-                toggle.setOn(builtSwitch.input.checked);
+        // Fixed layout so the cells split the width evenly.
+        const table = buildElement('table', 'table table-sm m-0');
+        table.style.tableLayout = 'fixed';
+        const tableBody = buildElement('tbody');
+        const row = buildElement('tr');
+        panelToggles.forEach((toggle, index) => {
+            const isLast = index === panelToggles.length - 1;
+            const cell = buildElement('td', `align-middle text-center${isLast ? '' : ' border-right'}`);
+            cell.id = toggle.elementId;
+            cell.style.padding = '0.3rem';
+            cell.addEventListener('contextmenu', (event) => {
+                event.preventDefault();
+                toggle.setOn(!toggle.isOn());
                 refreshPanel();
             });
-            builtSwitch.row.classList.add('flex-fill', 'text-nowrap');
-            togglesRow.appendChild(builtSwitch.row);
-            toggle.input = builtSwitch.input;
+
+            const name = buildElement('span', null, toggle.labelText);
+            attachTooltip(name, toggle.description, 'top');
+            cell.appendChild(name);
+            row.appendChild(cell);
+            toggle.cell = cell;
         });
-        body.appendChild(togglesRow);
+        tableBody.appendChild(row);
+        table.appendChild(tableBody);
+        body.appendChild(table);
 
         controlElements.panel = panel;
         return panel;
     };
 
-    // Mirrors each flag onto its switch, keeping hotkeys and panel in agreement.
+    // The game's grey-out rule is scoped to #pokeballSelector, so its colours are copied.
     const refreshPanelButtons = () => {
         panelToggles.forEach((toggle) => {
-            if (toggle.input) {
-                toggle.input.checked = toggle.isOn();
+            if (!toggle.cell) {
+                return;
             }
+            const isOn = toggle.isOn();
+            toggle.cell.style.backgroundColor = isOn ? '' : 'gray';
+            toggle.cell.style.color = isOn ? '' : 'lightgray';
         });
     };
 
@@ -100,6 +142,8 @@
         refreshPanelButtons();
         refreshCrawlerControls();
         refreshHatcheryButton();
+        refreshSafariButton();
+        savePreferences();
     }
 
     // Each column keeps its own order setting, and the cards are in different ones.

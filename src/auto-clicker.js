@@ -34,6 +34,7 @@
         clickAttack();
     };
 
-    contributeToggle('helperClickerSwitch', 'Auto clicker',
+    contributeToggle('helperClickerToggle', 'Auto Clicker [N]',
+        'Click attacks on routes, gyms, dungeons and temporary battles.',
         () => isClickerRunning,
         (isOn) => { isClickerRunning = isOn; });

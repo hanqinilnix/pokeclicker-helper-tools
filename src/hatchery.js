@@ -139,7 +139,7 @@
             if (isHatcheryAutoFillRunning) {
                 hatcheryAutoFillTick();
             }
-            refreshHatcheryButton();
+            refreshPanel();
         });
         warningsRow.appendChild(autoFillButton);
         hatcheryAutoFillButtonElement = autoFillButton;

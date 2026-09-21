@@ -64,10 +64,13 @@ class ShimElement {
     setAttribute(name, value) { this.attributes[name] = String(value); }
     getAttribute(name) { return this.attributes[name] ?? null; }
     addEventListener(type, handler) { (this.listeners[type] ??= []).push(handler); }
-    matches() { return false; }
+    matches(selector) { return selector.includes('input') && this.tagName === 'INPUT'; }
+    // Leaving a field fires its change listeners, as a browser does.
+    blur() { (this.listeners.change || []).forEach((handler) => handler()); }
 }
 
 const allElements = [];
+const keydownHandlers = [];
 const makeElement = (tagName) => { const element = new ShimElement(tagName); allElements.push(element); return element; };
 
 const document = {
@@ -78,6 +81,7 @@ const document = {
             '#breedingModal .hatchery-warnings': 'hatchery-warnings',
             '#dungeonGuidesModal .nav-tabs': 'nav-tabs',
             '#dungeonGuidesModal .tab-content': 'tab-content',
+            '#safariModal .modalClose': 'modalClose',
         }[selector];
         if (byClass) return allElements.find((element) => element.classList.contains(byClass)) ?? null;
         if (selector === '#treasures button[data-bind*="quickSellEnabled"]') {
@@ -86,7 +90,7 @@ const document = {
         }
         return null;
     },
-    addEventListener: () => {},
+    addEventListener: (type, handler) => { if (type === 'keydown') keydownHandlers.push(handler); },
     documentElement: makeElement('html'),
 };
 
@@ -108,6 +112,9 @@ const GameConstants = {
     DungeonTileType: { empty: 0, entrance: 1, enemy: 2, chest: 3, boss: 4, ladder: 5 },
     GameState: { loading: -1, idle: 0, paused: 1, fighting: 2, gym: 3, dungeon: 4, safari: 5, town: 6, shop: 7, battleFrontier: 8, temporaryBattle: 9 },
     DungeonInteractionSource: { Click: 0, Keybind: 1, HeldKeybind: 2, DungeonGuide: 3 },
+    SafariTile: { ground: 0, waterC: 5, grass: 10, treeTopC: 30 },
+    SAFARI_LEGAL_WALK_BLOCKS: [0, 5, 10],
+    SAFARI_WATER_BLOCKS: [5],
 };
 
 const breeding = {
@@ -163,14 +170,97 @@ const undergroundItems = [
     { itemName: 'Rare Bone', valueType: 3, value: 1, sellLocked: () => false },
 ];
 
+// safari fixture: 5x5, a grass band across the middle, grass bottom-left
+const safariGrid = [
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 10, 10, 10, 0],
+    [0, 0, 0, 0, 0],
+    [10, 0, 0, 0, 0],
+];
+const safariActions = [];
+// move/stop follow Safari.move, setNextDirection and stop closely enough to
+// show whether a held direction and its turns come out right.
+const Safari = {
+    grid: safariGrid,
+    accessibleTiles: safariGrid.map((row) => row.map(() => true)),
+    pokemonGrid: makeObservable([]),
+    itemGrid: makeObservable([]),
+    playerXY: { x: 2, y: 4 },
+    isMoving: false,
+    walking: false,
+    queue: [],
+    inProgress: makeObservable(true),
+    inBattle: makeObservable(false),
+    balls: makeObservable(30),
+    safariLevel: makeObservable(20),
+    move(direction) {
+        if (!this.walking && !this.isMoving) {
+            this.queue = [direction];
+            this.walking = true;
+        } else if (this.queue[0] !== direction) {
+            if (this.queue.length === 1) this.queue.unshift(direction); else this.queue[0] = direction;
+            this.walking = true;
+        }
+    },
+    stop(direction) {
+        this.queue = this.queue.filter((queued) => queued !== direction);
+        if (!this.queue.length) this.walking = false;
+    },
+    canPay: () => safariCanPay,
+    payEntranceFee() { safariFeesPaid++; this.inProgress(true); },
+    openModal: () => { safariModalOpens++; },
+};
+let safariFeesPaid = 0;
+let safariModalOpens = 0;
+let safariCanPay = true;
+let doneSoundsPlayed = 0;
+// modalState tracks show/hide/hidden; _isTransitioning is Bootstrap's own flag.
+let safariModalState = 'show';
+let safariModalTransitioning = false;
+const DisplayObservables = { modalState: { get safariModal() { return safariModalState; } } };
+// Bootstrap tooltips land here, keyed by element, so tests can read them.
+const tooltips = new Map();
+const jQueryShim = (target) => ({
+    on: () => {},
+    tooltip: (config) => { tooltips.set(target, config); },
+    data: () => ({ _isShown: safariModalState === 'show', _isTransitioning: safariModalTransitioning }),
+});
+const berryStock = { Razz: 5, Nanab: 5 };
+const BaitList = {
+    Bait: { name: 'Bait', amount: () => 'inf' },
+    Razz: { name: 'Razz', amount: () => berryStock.Razz },
+    Nanab: { name: 'Nanab', amount: () => berryStock.Nanab },
+};
+const SafariBattle = {
+    busy: makeObservable(false),
+    enemy: null,
+    selectedBait: makeObservable(BaitList.Bait),
+    throwBall: () => safariActions.push('ball'),
+    throwRock: () => safariActions.push('rock'),
+    throwBait: () => safariActions.push('bait:' + SafariBattle.selectedBait().name),
+};
+let magicBallBonus = 0;
+
+// Saved preferences from an earlier session, two of them invalid on purpose.
+const PREFERENCES_KEY = 'pokeclicker-helper.preferences';
+const storage = new Map([[PREFERENCES_KEY, JSON.stringify({
+    isFrontierRestartRunning: true,
+    dungeonRunsRequested: 3,
+    chestSettings: { mythic: { isEnabled: false, priority: 2 }, epic: { isEnabled: true, priority: -4 } },
+    crawlerMode: 'nonsense',
+    safariRunsRequested: -2,
+})]]);
+
 const timers = [];
 const refreshHandlers = [];
+const safariHandlers = [];
 const autoFillHandlers = [];
 const context = {
     document,
     console,
-    localStorage: { getItem: () => null, setItem: () => {} },
-    setInterval: (fn, ms) => { timers.push(ms); if (ms === 500) refreshHandlers.push(fn); if (ms === 2000) autoFillHandlers.push(fn); return timers.length; },
+    localStorage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, String(value)) },
+    setInterval: (fn, ms) => { timers.push(ms); if (ms === 500) refreshHandlers.push(fn); if (ms === 2000) autoFillHandlers.push(fn); if (ms === 60) safariHandlers.push(fn); return timers.length; },
     setTimeout: (fn, ms) => { timers.push('timeout:' + ms); return timers.length; },
     GameConstants: Object.assign({ Currency: { money: 0, questPoint: 1, dungeonToken: 2, diamond: 3 } }, GameConstants),
     DungeonRunner: {
@@ -190,7 +280,10 @@ const context = {
     BattleFrontierRunner: { battleLost: () => {}, start: () => {}, started: makeObservable(false) },
     PartyController: { compareBy: () => () => 0 },
     Notifier: { notify: (options) => { notifications.push(options.message); console.log('  [notify] ' + options.message); } },
-    NotificationConstants: { NotificationOption: { info: 0 } },
+    NotificationConstants: {
+        NotificationOption: { info: 0 },
+        NotificationSound: { General: { dungeon_guide_complete: { play: () => { doneSoundsPlayed++; } } } },
+    },
     Settings: { getSetting: (name) => ({ observableValue: () => savedModuleOrder[name] ?? '' }) },
     App: {
         game: {
@@ -225,6 +318,12 @@ const context = {
         },
     },
     SortModules: gameSortModules,
+    Safari,
+    SafariBattle,
+    BaitList,
+    OakItemType: { Magic_Ball: 0 },
+    DisplayObservables,
+    $: jQueryShim,
     window: {},
 };
 
@@ -256,6 +355,14 @@ guidesTabContent.className = 'tab-content p-0';
     pane.className = 'tab-pane fade';
     guidesTabContent.appendChild(pane);
 });
+
+// safari modal header: the game's Leave button is the helper button's anchor
+const safariHeader = makeElement('div');
+safariHeader.className = 'modal-header';
+const safariLeaveButton = makeElement('button');
+safariLeaveButton.className = 'btn btn-danger modalClose';
+safariLeaveButton.textContent = 'Leave';
+safariHeader.appendChild(safariLeaveButton);
 
 // underground treasures tab: the Quick-Sell Mode button and its form-group
 const quickSellGroup = makeElement('div');
@@ -299,6 +406,39 @@ vm.runInContext(fs.readFileSync(SCRIPT_PATH, 'utf8'), context);
 const CHEST_RARITY_COUNT = 5;
 let failures = 0;
 const fail = (message) => { console.log('FAIL: ' + message); failures++; };
+const rightClick = (element) => {
+    let prevented = false;
+    (element.listeners.contextmenu || []).forEach((handler) => handler({ preventDefault: () => { prevented = true; } }));
+    return prevented;
+};
+const toggleState = (cell) => (cell.style.backgroundColor === 'gray' ? 'Off' : 'On');
+
+// --- saved preferences: load ---------------------------------------------
+{
+    console.log('--- saved preferences (load) ---');
+    const frontierRow = document.getElementById('helperFrontierToggle');
+    const crawlerNumbers = [];
+    const collect = (element) => { if (element.tagName === 'INPUT') crawlerNumbers.push(element); element.children.forEach(collect); };
+    collect(document.getElementById('helperCrawlerPanel'));
+    const checkboxes = crawlerNumbers.filter((input) => input.type === 'checkbox');
+    const numbers = crawlerNumbers.filter((input) => input.type === 'number');
+    const attempts = numbers[numbers.length - 1];
+    const epicPriority = numbers[2];
+    console.log('  frontier ' + toggleState(frontierRow) + ', attempts ' + attempts.value + ', mythic ' + checkboxes[4].checked
+        + ', epic priority ' + epicPriority.value + ', safari runs ' + document.getElementById('helperSafariRuns').value);
+    if (toggleState(frontierRow) !== 'On') fail('saved frontier restart not restored');
+    if (attempts.value !== '3') fail('saved attempts not restored: ' + attempts.value);
+    if (checkboxes[4].checked) fail('saved mythic switch-off not restored');
+    if (epicPriority.value !== '1.5') fail('invalid saved priority was used: ' + epicPriority.value);
+    if (document.getElementById('helperSafariRuns').value !== '1') fail('invalid saved safari runs was used');
+    // Put the defaults back, so the checks below see a fresh install.
+    rightClick(frontierRow);
+    attempts.value = '1';
+    (attempts.listeners.change || []).forEach((handler) => handler());
+    checkboxes[4].checked = true;
+    (checkboxes[4].listeners.change || []).forEach((handler) => handler());
+    console.log('');
+}
 
 // --- panel ---------------------------------------------------------------
 const panel = document.getElementById('helperPanel');
@@ -364,49 +504,52 @@ if (!panel) {
     if (!panel.classList.contains('sortable')) fail('panel is not draggable (missing .sortable)');
 
     console.log('');
-    console.log('--- panel switches ---');
-    const switches = [];
-    const collectSwitches = (element) => {
-        if (element.classList.contains('custom-switch')) switches.push(element);
-        element.children.forEach(collectSwitches);
-    };
-    collectSwitches(panel);
-    if (switches.length !== 2) fail('expected 2 switches in the panel, found ' + switches.length);
+    console.log('--- panel toggles ---');
+    // Poke Balls filter behaviour, laid out side by side with a line between.
+    const cells = ['helperClickerToggle', 'helperFrontierToggle'].map((id) => document.getElementById(id));
+    if (cells.some((cell) => !cell)) {
+        fail('toggle cells missing from the panel');
+    } else {
+        const description = (cell) => tooltips.get(cell.children[0])?.title ?? '';
+        console.log('  ' + cells.map((cell) => cell.textContent + ' (' + toggleState(cell) + ') [' + cell.className + ']').join('  |  '));
+        cells.forEach((cell) => console.log('    ' + cell.textContent + ' tooltip: "' + description(cell) + '"'));
+        if (cells[0].parentNode !== cells[1].parentNode || cells[0].parentNode.tagName !== 'TR') fail('toggles are not side by side in one row');
+        if (!cells[0].classList.contains('border-right')) fail('no dividing line after the left toggle');
+        if (cells[1].classList.contains('border-right')) fail('dividing line after the last toggle');
+        cells.forEach((cell) => {
+            if (!description(cell)) fail(cell.id + ' has no description tooltip');
+            if (cell.children[0].title) fail(cell.id + ' title attribute would override the Bootstrap tooltip');
+        });
 
-    // both toggles must share one flex row rather than stacking
-    if (switches.length === 2) {
-        if (switches[0].parentNode !== switches[1].parentNode) {
-            fail('toggles are not in the same row');
-        } else {
-            const row = switches[0].parentNode;
-            console.log('  row classes: ' + row.className + '  gap=' + row.style.gap);
-            if (!row.classList.contains('d-flex')) fail('toggle row is not a flex row');
-            if (!row.classList.contains('flex-wrap')) fail('toggle row cannot wrap on a narrow host');
-            switches.forEach((toggle) => {
-                if (!toggle.classList.contains('text-nowrap')) fail('toggle label can break mid-word');
-            });
-        }
+        const clickerCell = cells[0];
+        if (toggleState(clickerCell) !== 'Off' || clickerCell.style.color !== 'lightgray') fail('off cell is not greyed out');
+        if (!rightClick(clickerCell)) fail('right click did not suppress the browser menu');
+        console.log('  after right click on auto clicker -> ' + toggleState(clickerCell));
+        if (toggleState(clickerCell) !== 'On' || clickerCell.style.color) fail('right click did not turn auto clicker on');
+
+        // a hotkey flips the flag; the refresh must mirror it back onto the cell
+        refreshHandlers.forEach((handler) => handler());
+        if (toggleState(clickerCell) !== 'On') fail('auto clicker cell did not stay on');
+        rightClick(clickerCell);
+        if (toggleState(clickerCell) !== 'Off') fail('second right click did not turn auto clicker off');
     }
-    switches.forEach((row) => {
-        const input = row.children[0];
-        const label = row.children[1];
-        console.log('  [' + (input.checked ? 'x' : ' ') + '] ' + label.textContent + '  (id=' + input.id + ')');
-        if (input.type !== 'checkbox') fail('switch input is not a checkbox');
-        if (!input.id) fail('switch input has no id');
-        if (label.getAttribute('for') !== input.id) fail('switch label "for" does not match its input id');
-        if (!row.classList.contains('custom-control')) fail('switch row missing custom-control');
-    });
 
-    // a hotkey flips the flag; the refresh must mirror it back onto the switch
-    const clickerInput = document.getElementById('helperClickerSwitch');
-    const clickerChange = (clickerInput.listeners.change || [])[0];
-    clickerInput.checked = true;
-    clickerChange();
-    refreshHandlers.forEach((handler) => handler());
-    console.log('  after toggling auto clicker on -> checked=' + clickerInput.checked);
-    if (!clickerInput.checked) fail('auto clicker switch did not stay on');
-    clickerInput.checked = false;
-    clickerChange();
+    // Help button: the Poke Balls "?" with one hotkey per line in its tooltip.
+    const helpButton = document.getElementById('helperHelpButton');
+    const helpLines = (tooltips.get(helpButton)?.title ?? '').split('<br>');
+    if (!helpButton) {
+        fail('no help button on the Helper card');
+    } else {
+        console.log('  help button "' + helpButton.textContent + '" [' + helpButton.className + '] tooltip:');
+        helpLines.forEach((line) => console.log('    ' + line));
+        if (helpButton.parentNode !== panel) fail('help button is not on the card itself');
+        if (helpButton.className !== 'btn btn-info') fail('help button styling differs from the Poke Balls card');
+        if (helpButton.title) fail('help button title attribute would override the Bootstrap tooltip');
+        if (tooltips.get(helpButton)?.html !== true) fail('help tooltip is not html, so the lines would run together');
+        const keys = helpLines.map((line) => line.split(' - ')[0]);
+        if (keys.join(',') !== 'J,V,N,G') fail('expected one hotkey per line, got ' + JSON.stringify(helpLines));
+        if (helpLines.some((line) => /right click/i.test(line))) fail('toggle hint still in the help tooltip');
+    }
 }
 
 // --- crawler panel --------------------------------------------------------
@@ -734,4 +877,347 @@ if (!diamondButton || !gemButton) {
 }
 
 console.log(failures ? failures + ' FAILURE(S) (underground)' : 'underground checks passed');
+if (failures) process.exitCode = 1;
+
+// --- safari crawler -------------------------------------------------------
+console.log('');
+console.log('--- safari modal header ---');
+console.log('  ' + safariHeader.children.map((child) => child.tagName + '#' + (child.id || '-')
+    + ' "' + child.textContent + '"').join(' -> '));
+
+const safariButton = document.getElementById('helperSafariToggle');
+const safariControls = document.getElementById('helperSafariControls');
+const safariRunsInput = document.getElementById('helperSafariRuns');
+if (!safariButton || !safariControls || !safariRunsInput) {
+    fail('safari controls not inserted into the modal header');
+} else {
+    const refreshAll = () => refreshHandlers.forEach((handler) => handler());
+    const safariTick = () => safariHandlers.forEach((handler) => handler());
+    const isShown = (element) => element.style.display !== 'none';
+
+    // Before the game's own Leave button, so the controls sit together.
+    const headerOrder = safariHeader.children.map((child) => child.id || 'leave');
+    if (headerOrder.join(',') !== 'helperSafariControls,leave') {
+        fail('unexpected safari header order: ' + headerOrder.join(','));
+    }
+
+    // A run entered by hand can be taken over partway: no fee, and it counts
+    // as the first run.
+    context.App.game.gameState = GameConstants.GameState.safari;
+    context.App.game.oakItems = { calculateBonus: () => magicBallBonus };
+    Safari.inProgress(true);
+    refreshAll();
+    console.log('  manual run     -> BUTTON "' + safariButton.textContent + '"');
+    if (!isShown(safariControls) || !isShown(safariRunsInput)) fail('auto safari not offered in the middle of a manual run');
+    (safariButton.listeners.click || []).forEach((handler) => handler());
+    console.log('  taken over     -> fees paid ' + safariFeesPaid + ', holding ' + (Safari.queue.join(',') || 'nothing')
+        + ', BUTTON "' + safariButton.textContent + '"');
+    if (safariFeesPaid !== 0) fail('paid a fee to take over a run already under way');
+    if (!Safari.walking) fail('did not start walking the run it took over');
+    if (safariButton.textContent !== 'Stop auto safari (run 1 of 1)') fail('taken-over run label is "' + safariButton.textContent + '"');
+    Safari.queue.slice().forEach((direction) => Safari.stop(direction));
+    Safari.inProgress(false);
+    safariTick();
+    console.log('  its run ends   -> BUTTON "' + safariButton.textContent + '", sounds ' + doneSoundsPlayed);
+    if (safariButton.textContent !== 'Auto safari 1 run') fail('taken-over run was not counted as run 1 of 1');
+    if (doneSoundsPlayed !== 1 || safariFeesPaid !== 0) fail('taken-over run did not finish cleanly');
+    doneSoundsPlayed = 0;
+
+    Safari.inProgress(false);
+    refreshAll();
+    console.log('  entrance screen -> INPUT value=' + safariRunsInput.value + ', BUTTON "' + safariButton.textContent + '"');
+    if (!isShown(safariControls) || !isShown(safariRunsInput)) fail('auto safari not offered on the entrance screen');
+
+    safariRunsInput.value = '2';
+    (safariRunsInput.listeners.change || []).forEach((handler) => handler());
+    if (safariButton.textContent !== 'Auto safari 2 runs') fail('runs input not reflected: ' + safariButton.textContent);
+
+    console.log('');
+    console.log('--- safari runs ---');
+    (safariButton.listeners.click || []).forEach((handler) => handler());
+    console.log('  after start -> fees paid ' + safariFeesPaid + ', BUTTON "' + safariButton.textContent + '"');
+    if (safariFeesPaid !== 1 || !Safari.inProgress()) fail('starting did not pay for the first run');
+    if (safariButton.textContent !== 'Stop auto safari (run 1 of 2)') fail('running label is "' + safariButton.textContent + '"');
+    if (isShown(safariRunsInput)) fail('runs input still editable mid-run');
+
+    console.log('');
+    console.log('--- safari walking ---');
+    const releaseAll = () => Safari.queue.slice().forEach((direction) => Safari.stop(direction));
+    // Plays the held direction out one tile, the way the step animation would.
+    const advanceSafariPlayer = () => {
+        const offset = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }[Safari.queue[0]];
+        if (!offset) return false;
+        Safari.playerXY = { x: Safari.playerXY.x + offset[0], y: Safari.playerXY.y + offset[1] };
+        return true;
+    };
+
+    // An item outranks a Pokemon, even a nearer one.
+    Safari.itemGrid([{ x: 4, y: 4 }]);
+    Safari.pokemonGrid([{ x: 2, y: 3 }]);
+    safariTick();
+    console.log('  item (4,4) vs pokemon (2,3) -> holding ' + Safari.queue.join(','));
+    if (Safari.queue[0] !== 'right') fail('expected to head right for the item, holding ' + Safari.queue.join(','));
+    if (!Safari.walking) fail('direction is not being held');
+
+    // Held, not tapped: another tick on the same tile changes nothing.
+    Safari.isMoving = true;
+    safariTick();
+    if (Safari.queue.join(',') !== 'right') fail('re-steered a tile already steered: ' + Safari.queue.join(','));
+    Safari.isMoving = false;
+
+    // Pokemon beyond the grass band: the route goes round it, turning on the
+    // move without ever letting go.
+    releaseAll();
+    Safari.playerXY = { x: 2, y: 4 };
+    Safari.itemGrid([]);
+    Safari.pokemonGrid([{ x: 2, y: 0 }]);
+    const route = [];
+    let wasReleased = false;
+    for (let tile = 0; tile < 12; tile++) {
+        safariTick();
+        if (route.length && !Safari.walking) wasReleased = true;
+        Safari.isMoving = true;
+        if (!advanceSafariPlayer()) break;
+        route.push(Safari.playerXY.x + ',' + Safari.playerXY.y);
+        if (Safari.playerXY.x === 2 && Safari.playerXY.y === 0) break;
+    }
+    Safari.isMoving = false;
+    console.log('  route to (2,0) -> ' + route.join(' '));
+    if (route[route.length - 1] !== '2,0') fail('never reached the Pokemon');
+    if (route.some((tile) => { const [x, y] = tile.split(',').map(Number); return safariGrid[y][x] === 10; })) {
+        fail('walked through grass on the way');
+    }
+    if (wasReleased) fail('let go of the direction mid-route');
+    if (route.length !== 8) fail('route is not the shortest way round: ' + route.length + ' tiles');
+
+    // Nothing spawned: grass is the target, and it keeps walking inside it.
+    releaseAll();
+    Safari.pokemonGrid([]);
+    Safari.playerXY = { x: 2, y: 3 };
+    safariTick();
+    console.log('  no spawns at (2,3)        -> holding ' + Safari.queue.join(','));
+    if (Safari.queue[0] !== 'up') fail('expected to step up into the grass band, holding ' + Safari.queue.join(','));
+    Safari.isMoving = true;
+    advanceSafariPlayer();
+    safariTick();
+    console.log('  inside the band at (2,2)  -> holding ' + Safari.queue.join(','));
+    if (!['left', 'right'].includes(Safari.queue[0])) fail('left the grass instead of wandering it: ' + Safari.queue.join(','));
+    Safari.isMoving = false;
+    releaseAll();
+
+    console.log('');
+    console.log('--- safari battle ---');
+    const runBattle = (enemy, turns) => {
+        safariActions.length = 0;
+        SafariBattle.enemy = enemy;
+        Safari.inBattle(true);
+        for (let turn = 0; turn < turns; turn++) safariTick();
+        Safari.inBattle(false);
+        return safariActions.join(',');
+    };
+    const tough = () => ({ baseCatchFactor: 170 / 6, catchFactor: 32 });
+
+    // Catch rate 170, level 20, no Magic Ball: the wiki says Nanab then Rock.
+    let actions = runBattle(tough(), 4);
+    console.log('  rate 170, lvl 20, no MB -> ' + actions);
+    if (actions !== 'bait:Nanab,rock,ball,ball') fail('wrong opener for rate 170 lvl 20: ' + actions);
+    if (SafariBattle.selectedBait() !== BaitList.Bait) fail('player bait selection was not restored');
+
+    // The same Pokemon at level 10 is on the Razz side of the table.
+    Safari.safariLevel(10);
+    actions = runBattle(tough(), 3);
+    console.log('  rate 170, lvl 10, no MB -> ' + actions);
+    if (actions !== 'bait:Razz,rock,ball') fail('wrong opener for rate 170 lvl 10: ' + actions);
+
+    // Level 5 Magic Ball, rate 180, level 40: Razz alone.
+    Safari.safariLevel(40);
+    magicBallBonus = 10;
+    actions = runBattle({ baseCatchFactor: 30, catchFactor: 60 }, 2);
+    console.log('  rate 180, lvl 40, MB 5  -> ' + actions);
+    if (actions !== 'bait:Razz,ball') fail('wrong opener for rate 180 lvl 40 with Magic Ball: ' + actions);
+    magicBallBonus = 0;
+    Safari.safariLevel(20);
+
+    // No Nanab left: skip the opener rather than Rock without its bait.
+    berryStock.Nanab = 0;
+    actions = runBattle(tough(), 2);
+    console.log('  no Nanab berries        -> ' + actions);
+    if (actions !== 'ball,ball') fail('threw an opener without its berry: ' + actions);
+    berryStock.Nanab = 5;
+
+    // Already certain: an opener would only waste turns.
+    actions = runBattle({ baseCatchFactor: 45, catchFactor: 100 }, 1);
+    if (actions !== 'ball') fail('opened on a guaranteed catch: ' + actions);
+
+    // busy() is the game's gate on every animation chain.
+    safariActions.length = 0;
+    SafariBattle.enemy = tough();
+    Safari.inBattle(true);
+    SafariBattle.busy(true);
+    safariTick();
+    if (safariActions.length) fail('acted over a busy animation');
+    SafariBattle.busy(false);
+    Safari.inBattle(false);
+
+    console.log('');
+    console.log('--- safari run end ---');
+    // gameOver: inProgress cleared, then the modal closes. The next run waits
+    // for it to close, reopens it, and pays once it has opened.
+    Safari.inProgress(false);
+    safariModalState = 'hide';
+    safariTick();
+    if (safariModalOpens !== 0 || safariFeesPaid !== 1) fail('acted while the modal was still closing');
+    safariModalState = 'hidden';
+    safariTick();
+    if (safariModalOpens !== 1) fail('did not reopen the modal for run 2');
+    safariModalState = 'show';
+    safariModalTransitioning = true;
+    safariTick();
+    if (safariFeesPaid !== 1) fail('paid before the modal finished opening');
+    safariModalTransitioning = false;
+    safariTick();
+    refreshAll();
+    console.log('  run 1 over -> fees paid ' + safariFeesPaid + ', BUTTON "' + safariButton.textContent + '"');
+    if (safariFeesPaid !== 2) fail('did not pay for run 2');
+    if (safariButton.textContent !== 'Stop auto safari (run 2 of 2)') fail('run 2 label is "' + safariButton.textContent + '"');
+
+    // The last run ends: stop, let go of the keys, and play the done sound.
+    Safari.queue = ['up'];
+    Safari.walking = true;
+    Safari.inProgress(false);
+    refreshAll();
+    safariTick();
+    console.log('  run 2 over -> BUTTON "' + safariButton.textContent + '", sounds ' + doneSoundsPlayed
+        + ', holding ' + (Safari.queue.join(',') || 'nothing'));
+    if (safariButton.textContent !== 'Auto safari 2 runs') fail('kept running after the last run');
+    if (safariFeesPaid !== 2) fail('paid for a run beyond the count');
+    if (doneSoundsPlayed !== 1) fail('no sound when the runs finished');
+    if (Safari.queue.length) fail('finishing left a direction held');
+
+    // Out of Quest Points: stop, and still say so with the sound.
+    safariCanPay = false;
+    safariModalState = 'show';
+    (safariButton.listeners.click || []).forEach((handler) => handler());
+    console.log('  cannot pay -> fees paid ' + safariFeesPaid + ', sounds ' + doneSoundsPlayed);
+    if (safariFeesPaid !== 2 || safariButton.textContent !== 'Auto safari 2 runs') fail('ran without Quest Points');
+    if (doneSoundsPlayed !== 2) fail('no sound when stopping for Quest Points');
+    safariCanPay = true;
+
+    // Leaving mid-run pauses: keys let go, nothing is paid, and going back in
+    // carries on with the same run.
+    (safariButton.listeners.click || []).forEach((handler) => handler());
+    const feesBeforeLeaving = safariFeesPaid;
+    Safari.queue = ['left'];
+    Safari.walking = true;
+    context.App.game.gameState = GameConstants.GameState.town;
+    safariTick();
+    safariTick();
+    refreshAll();
+    console.log('  left mid-run -> BUTTON "' + safariButton.textContent + '", holding ' + (Safari.queue.join(',') || 'nothing'));
+    if (!/^Stop auto safari/.test(safariButton.textContent)) fail('leaving mid-run stopped auto safari instead of pausing it');
+    if (Safari.queue.length) fail('leaving mid-run left a direction held');
+    if (safariFeesPaid !== feesBeforeLeaving || safariModalOpens !== 1) fail('tried to open or pay while the run was only paused');
+    context.App.game.gameState = GameConstants.GameState.safari;
+    Safari.playerXY = { x: 2, y: 4 };
+    safariTick();
+    console.log('  went back    -> holding ' + (Safari.queue.join(',') || 'nothing'));
+    if (!Safari.walking) fail('did not carry on walking after going back in');
+    (safariButton.listeners.click || []).forEach((handler) => handler());
+    if (safariButton.textContent !== 'Auto safari 2 runs') fail('Stop did not stop a resumed run');
+}
+
+console.log(failures ? failures + ' FAILURE(S) (safari)' : 'safari checks passed');
+if (failures) process.exitCode = 1;
+
+// --- saved preferences: save ---------------------------------------------
+console.log('');
+console.log('--- saved preferences (save) ---');
+{
+    const saved = JSON.parse(storage.get(PREFERENCES_KEY) || '{}');
+    console.log('  ' + JSON.stringify(saved));
+    if (saved.crawlerMode !== 'allChests') fail('invalid saved crawler mode survived a save');
+    if (saved.safariRunsRequested !== 2) fail('safari runs not saved');
+    if (saved.chestSettings?.epic?.priority !== 1.5) fail('invalid saved priority survived a save');
+    if (saved.isFrontierRestartRunning !== false) fail('frontier switch-off not saved');
+    if (typeof saved.isClickerRunning !== 'boolean' || typeof saved.isHatcheryAutoFillRunning !== 'boolean') {
+        fail('toggles missing from the saved preferences');
+    }
+    if ('isCrawlerRunning' in saved || 'isSafariRunning' in saved) fail('a run in progress was saved');
+
+    // The hotkey path saves too, not only the switches.
+    context.App.game.gameState = GameConstants.GameState.town;
+    rightClick(document.getElementById('helperClickerToggle'));
+    if (JSON.parse(storage.get(PREFERENCES_KEY)).isClickerRunning !== true) fail('auto clicker switch-on not saved');
+}
+
+console.log(failures ? failures + ' FAILURE(S) (preferences)' : 'preference checks passed');
+if (failures) process.exitCode = 1;
+
+// --- crawler finish sound -------------------------------------------------
+console.log('');
+console.log('--- crawler finish sound ---');
+{
+    const crawlerButtons = [];
+    const collect = (element) => { if (element.tagName === 'BUTTON') crawlerButtons.push(element); element.children.forEach(collect); };
+    collect(document.getElementById('helperCrawlerPanel'));
+    const crawlerButton = crawlerButtons.find((button) => /crawler|Stop \(/i.test(button.textContent));
+    const press = () => (crawlerButton.listeners.click || []).forEach((handler) => handler());
+    context.App.game.gameState = GameConstants.GameState.town;
+    context.player.town = { dungeon: {} };
+
+    // The last attempt ending on its own plays the sound.
+    const soundsBefore = doneSoundsPlayed;
+    press();
+    context.DungeonRunner.dungeonFinished(true);
+    context.DungeonRunner.dungeonFinished(false);
+    console.log('  all attempts done -> BUTTON "' + crawlerButton.textContent + '", sounds ' + (doneSoundsPlayed - soundsBefore));
+    if (doneSoundsPlayed - soundsBefore !== 1) fail('no sound when the crawler finished its attempts');
+
+    // Stopping it by hand is not worth a sound.
+    press();
+    press();
+    console.log('  stopped by hand   -> BUTTON "' + crawlerButton.textContent + '", sounds ' + (doneSoundsPlayed - soundsBefore));
+    if (doneSoundsPlayed - soundsBefore !== 1) fail('played the sound for a stop the player asked for');
+}
+
+console.log(failures ? failures + ' FAILURE(S) (crawler sound)' : 'crawler sound checks passed');
+if (failures) process.exitCode = 1;
+
+// --- safari hotkey --------------------------------------------------------
+console.log('');
+console.log('--- safari hotkey ---');
+{
+    const pressKey = (key, target) => keydownHandlers.forEach((handler) => handler({
+        key, target: target ?? document.documentElement, preventDefault: () => {},
+    }));
+    const button = document.getElementById('helperSafariToggle');
+    const runsBox = document.getElementById('helperSafariRuns');
+    const notifiedBefore = notifications.length;
+    const feesBefore = safariFeesPaid;
+    Safari.queue.slice().forEach((direction) => Safari.stop(direction));
+
+    // Anywhere but the safari screen, V does nothing at all.
+    context.App.game.gameState = GameConstants.GameState.town;
+    Safari.inProgress(false);
+    pressKey('v');
+    console.log('  V in a town -> BUTTON "' + button.textContent + '", notifications ' + (notifications.length - notifiedBefore));
+    if (/^Stop/.test(button.textContent)) fail('V started auto safari outside the safari screen');
+    if (notifications.length !== notifiedBefore) fail('V outside the safari screen still showed a notification');
+
+    // On the entrance screen, V starts and pays, even with the runs box focused
+    // and a new count typed but not yet committed.
+    context.App.game.gameState = GameConstants.GameState.safari;
+    safariModalState = 'show';
+    runsBox.value = '3';
+    pressKey('v', runsBox);
+    console.log('  V on the entrance, runs box says 3 -> fees paid ' + (safariFeesPaid - feesBefore) + ', BUTTON "' + button.textContent + '"');
+    if (safariFeesPaid - feesBefore !== 1) fail('V on the entrance screen did not start a run');
+    if (button.textContent !== 'Stop auto safari (run 1 of 3)') fail('V ignored the typed run count: ' + button.textContent);
+
+    // And V again stops it.
+    pressKey('v');
+    if (/^Stop/.test(button.textContent)) fail('V did not stop auto safari');
+}
+
+console.log(failures ? failures + ' FAILURE(S) (safari hotkey)' : 'safari hotkey checks passed');
 if (failures) process.exitCode = 1;

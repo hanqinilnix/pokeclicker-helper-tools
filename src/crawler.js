@@ -173,11 +173,15 @@
         return App.game.gameState === gameStates().town && !!player?.town?.dungeon;
     };
 
-    const stopCrawler = (message) => {
+    // A stop the player asked for, there and then, gets no sound.
+    const stopCrawler = (message, isFinished = false) => {
         isCrawlerRunning = false;
         shouldStopAfterCurrentRun = false;
         if (message) {
             notify(message);
+        }
+        if (isFinished) {
+            playDoneSound();
         }
         refreshPanel();
     };
@@ -187,11 +191,11 @@
     const startNextDungeonRun = () => {
         const dungeon = player.town?.dungeon;
         if (!dungeon) {
-            stopCrawler('Stopped — not standing on a dungeon');
+            stopCrawler('Stopped — not standing on a dungeon', true);
             return;
         }
         if (!DungeonRunner.canStartDungeon(dungeon)) {
-            stopCrawler(`Stopped after ${dungeonRunsAttempted} — cannot enter (tokens or requirements)`);
+            stopCrawler(`Stopped after ${dungeonRunsAttempted} — cannot enter (tokens or requirements)`, true);
             return;
         }
 
@@ -295,14 +299,14 @@
         }
 
         if (dungeonRunsAttempted >= dungeonRunsRequested) {
-            stopCrawler(`Ran ${dungeonRunsAttempted} dungeon${dungeonRunsAttempted === 1 ? '' : 's'} — ${dungeonRunsCleared} cleared`);
+            stopCrawler(`Ran ${dungeonRunsAttempted} dungeon${dungeonRunsAttempted === 1 ? '' : 's'} — ${dungeonRunsCleared} cleared`, true);
             return;
         }
 
         // The graceful stop lands here rather than mid-run, so the dungeon tokens
         // already spent on this attempt are not thrown away.
         if (shouldStopAfterCurrentRun) {
-            stopCrawler(`Stopped after ${dungeonRunsAttempted} of ${dungeonRunsRequested} — ${dungeonRunsCleared} cleared`);
+            stopCrawler(`Stopped after ${dungeonRunsAttempted} of ${dungeonRunsRequested} — ${dungeonRunsCleared} cleared`, true);
             return;
         }
 

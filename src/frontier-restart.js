@@ -19,6 +19,7 @@
         };
     };
 
-    contributeToggle('helperFrontierSwitch', 'Frontier restart',
+    contributeToggle('helperFrontierToggle', 'Frontier Restart',
+        'Starts a new Battle Frontier run when one ends in a loss.',
         () => isFrontierRestartRunning,
         (isOn) => { isFrontierRestartRunning = isOn; });

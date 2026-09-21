@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PokeClicker Helper
 // @namespace    https://github.com/hanqinilnix/pokeclicker-helper-tools
-// @version      1.0.1
-// @description  Dungeon crawler, auto clicker and hatchery filler for PokeClicker
+// @version      1.1.0
+// @description  Dungeon crawler, safari crawler, auto clicker and hatchery filler for PokeClicker
 // @match        https://www.pokeclicker.com/*
 // @match        https://pokeclicker.com/*
 // @grant        none
@@ -32,13 +32,19 @@
     const PANEL_REFRESH_INTERVAL_MS = 500;
     // Timed: "reached level 100" has no observable to subscribe to.
     const HATCHERY_AUTO_FILL_INTERVAL_MS = 2000;
+    // Under the 250ms safari step, so every tile is steered before it ends.
+    const SAFARI_INTERVAL_MS = 60;
 
     // Only G J N V X Y Z are unbound by the game; see its HotkeySetting block.
     const CRAWLER_TOGGLE_KEY = 'j';
     const CLICKER_TOGGLE_KEY = 'n';
     const FILL_HATCHERY_KEY = 'g';
+    const SAFARI_TOGGLE_KEY = 'v';
 
     const DEFAULT_DUNGEON_RUNS = 1;
+    const DEFAULT_SAFARI_RUNS = 1;
+    // Costlier, not banned: a long enough detour loses to crossing grass.
+    const SAFARI_ENCOUNTER_TILE_COST = 8;
 
     // Three intents, kept apart rather than blended.
     const CrawlerMode = {
@@ -70,6 +76,9 @@
     let isClickerRunning = false;
     let isFrontierRestartRunning = false;
     let isHatcheryAutoFillRunning = false;
+    let isSafariRunning = false;
+    let safariRunsRequested = DEFAULT_SAFARI_RUNS;
+    let safariRunsCompleted = 0;
     let crawlerMode = CrawlerMode.allChests;
     let dungeonRunsRequested = DEFAULT_DUNGEON_RUNS;
     // Attempts drive the stop condition; clears are only reported.
@@ -86,6 +95,86 @@
     // An unreported tier is collected rather than silently skipped.
     const UNKNOWN_CHEST_SETTING = { isEnabled: true, priority: 1 };
 
+    // ---------------------------------------------------------------------
+    // Saved preferences
+    // ---------------------------------------------------------------------
+
+    // Choices only, never a run in progress; Settings would leave keys in the save.
+    const PREFERENCES_STORAGE_KEY = 'pokeclicker-helper.preferences';
+
+    const currentPreferences = () => ({
+        isClickerRunning,
+        isFrontierRestartRunning,
+        isHatcheryAutoFillRunning,
+        crawlerMode,
+        dungeonRunsRequested,
+        safariRunsRequested,
+        chestSettings,
+    });
+
+    let lastSavedPreferences = null;
+
+    // Only writes when something changed, so the panel refresh can call it.
+    const savePreferences = () => {
+        const serialized = JSON.stringify(currentPreferences());
+        if (serialized === lastSavedPreferences) {
+            return;
+        }
+        try {
+            localStorage.setItem(PREFERENCES_STORAGE_KEY, serialized);
+            lastSavedPreferences = serialized;
+        } catch (error) {
+            // Private windows: preferences just reset next time.
+        }
+    };
+
+    const isPositiveInteger = (value) => Number.isInteger(value) && value > 0;
+
+    // Each field is checked on its own, so one bad value costs only itself.
+    const loadPreferences = () => {
+        let stored;
+        try {
+            stored = JSON.parse(localStorage.getItem(PREFERENCES_STORAGE_KEY));
+        } catch (error) {
+            return;
+        }
+        if (!stored || typeof stored !== 'object') {
+            return;
+        }
+        lastSavedPreferences = JSON.stringify(stored);
+
+        if (typeof stored.isClickerRunning === 'boolean') {
+            isClickerRunning = stored.isClickerRunning;
+        }
+        if (typeof stored.isFrontierRestartRunning === 'boolean') {
+            isFrontierRestartRunning = stored.isFrontierRestartRunning;
+        }
+        if (typeof stored.isHatcheryAutoFillRunning === 'boolean') {
+            isHatcheryAutoFillRunning = stored.isHatcheryAutoFillRunning;
+        }
+        if (Object.values(CrawlerMode).includes(stored.crawlerMode)) {
+            crawlerMode = stored.crawlerMode;
+        }
+        if (isPositiveInteger(stored.dungeonRunsRequested)) {
+            dungeonRunsRequested = stored.dungeonRunsRequested;
+        }
+        if (isPositiveInteger(stored.safariRunsRequested)) {
+            safariRunsRequested = stored.safariRunsRequested;
+        }
+        CHEST_RARITIES.forEach((rarity) => {
+            const storedChest = stored.chestSettings?.[rarity];
+            if (typeof storedChest?.isEnabled === 'boolean') {
+                chestSettings[rarity].isEnabled = storedChest.isEnabled;
+            }
+            if (Number.isFinite(storedChest?.priority) && storedChest.priority >= MINIMUM_CHEST_PRIORITY) {
+                chestSettings[rarity].priority = storedChest.priority;
+            }
+        });
+    };
+
+    // Before any card is built, so every control starts from the saved value.
+    loadPreferences();
+
 
     const tileTypes = () => GameConstants.DungeonTileType;
     const gameStates = () => GameConstants.GameState;
@@ -97,6 +186,15 @@
             type: NotificationConstants.NotificationOption.info,
             timeout: 5000,
         });
+    };
+
+    // The Dungeon Guide's sound, so the player's own setting for it applies.
+    const playDoneSound = () => {
+        try {
+            NotificationConstants.NotificationSound.General.dungeon_guide_complete.play();
+        } catch (error) {
+            // Sounds are optional; the notification still says it is done.
+        }
     };
 
     // ---------------------------------------------------------------------
@@ -121,21 +219,6 @@
         input.value = String(value);
         input.style.width = '5.5rem';
         return input;
-    };
-
-    // Bootstrap draws the track on the label, so a mismatched `for` breaks it.
-    const buildSwitch = (elementId, labelText) => {
-        const row = buildElement('div', 'custom-control custom-switch');
-        const input = buildElement('input', 'custom-control-input');
-        input.type = 'checkbox';
-        input.id = elementId;
-        const label = buildElement('label', 'custom-control-label', labelText);
-        label.setAttribute('for', elementId);
-        // The theme sizes this below the card's 15px.
-        label.style.fontSize = 'inherit';
-        row.appendChild(input);
-        row.appendChild(label);
-        return { row, input, label };
     };
 
     const buildRow = () => {
@@ -242,43 +325,85 @@
         return { panel, body };
     };
 
-    // Modules register their own switch; registration order is display order.
+    // Modules register their own cell; registration order is left to right.
     const panelToggles = [];
 
-    const contributeToggle = (elementId, labelText, isOn, setOn) => {
-        panelToggles.push({ elementId, labelText, isOn, setOn, input: null });
+    const contributeToggle = (elementId, labelText, description, isOn, setOn) => {
+        panelToggles.push({ elementId, labelText, description, isOn, setOn, cell: null });
     };
+
+    // Bootstrap prefers a title attribute over the option, so it is only a fallback.
+    const attachTooltip = (element, title, placement) => {
+        if (typeof $ === 'function' && typeof $(element).tooltip === 'function') {
+            $(element).tooltip({ title, trigger: 'hover', placement, html: true, boundary: 'window', animation: false });
+        } else {
+            element.title = title.replace(/<br>/g, '\n');
+        }
+    };
+
+    // Built from the key constants, so it cannot drift from the handler.
+    const helpTooltip = () => [
+        `${CRAWLER_TOGGLE_KEY.toUpperCase()} - start/stop dungeon crawler`,
+        `${SAFARI_TOGGLE_KEY.toUpperCase()} - start/stop auto safari (in the Safari Zone)`,
+        `${CLICKER_TOGGLE_KEY.toUpperCase()} - toggle auto clicker`,
+        `${FILL_HATCHERY_KEY.toUpperCase()} - fill the hatchery and queue`,
+    ].join('<br>');
 
     const buildPanel = () => {
         const { panel, body } = buildCard(PANEL_ID, PANEL_BODY_ID, 'Helper', 'sortable');
+        // Flush like the Poke Balls card, so the cells reach the card edges.
+        body.classList.remove('p-2');
+        body.classList.add('p-0');
 
-        // A pair needs ~320px; flex-wrap covers a narrower host.
-        const togglesRow = buildRow();
-        togglesRow.classList.add('flex-wrap');
-        togglesRow.style.gap = '0.75rem';
+        // Copied off the Poke Balls card's "?" button, styles and all.
+        const helpButton = buildElement('button', 'btn btn-info', '?');
+        helpButton.type = 'button';
+        helpButton.id = 'helperHelpButton';
+        Object.assign(helpButton.style, {
+            position: 'absolute', right: '0px', top: '0px', width: 'auto', height: '41px', padding: '4px',
+        });
+        attachTooltip(helpButton, helpTooltip(), 'left');
+        panel.insertBefore(helpButton, body);
 
-        panelToggles.forEach((toggle) => {
-            const builtSwitch = buildSwitch(toggle.elementId, toggle.labelText);
-            builtSwitch.input.addEventListener('change', () => {
-                toggle.setOn(builtSwitch.input.checked);
+        // Fixed layout so the cells split the width evenly.
+        const table = buildElement('table', 'table table-sm m-0');
+        table.style.tableLayout = 'fixed';
+        const tableBody = buildElement('tbody');
+        const row = buildElement('tr');
+        panelToggles.forEach((toggle, index) => {
+            const isLast = index === panelToggles.length - 1;
+            const cell = buildElement('td', `align-middle text-center${isLast ? '' : ' border-right'}`);
+            cell.id = toggle.elementId;
+            cell.style.padding = '0.3rem';
+            cell.addEventListener('contextmenu', (event) => {
+                event.preventDefault();
+                toggle.setOn(!toggle.isOn());
                 refreshPanel();
             });
-            builtSwitch.row.classList.add('flex-fill', 'text-nowrap');
-            togglesRow.appendChild(builtSwitch.row);
-            toggle.input = builtSwitch.input;
+
+            const name = buildElement('span', null, toggle.labelText);
+            attachTooltip(name, toggle.description, 'top');
+            cell.appendChild(name);
+            row.appendChild(cell);
+            toggle.cell = cell;
         });
-        body.appendChild(togglesRow);
+        tableBody.appendChild(row);
+        table.appendChild(tableBody);
+        body.appendChild(table);
 
         controlElements.panel = panel;
         return panel;
     };
 
-    // Mirrors each flag onto its switch, keeping hotkeys and panel in agreement.
+    // The game's grey-out rule is scoped to #pokeballSelector, so its colours are copied.
     const refreshPanelButtons = () => {
         panelToggles.forEach((toggle) => {
-            if (toggle.input) {
-                toggle.input.checked = toggle.isOn();
+            if (!toggle.cell) {
+                return;
             }
+            const isOn = toggle.isOn();
+            toggle.cell.style.backgroundColor = isOn ? '' : 'gray';
+            toggle.cell.style.color = isOn ? '' : 'lightgray';
         });
     };
 
@@ -286,6 +411,8 @@
         refreshPanelButtons();
         refreshCrawlerControls();
         refreshHatcheryButton();
+        refreshSafariButton();
+        savePreferences();
     }
 
     // Each column keeps its own order setting, and the cards are in different ones.
@@ -429,7 +556,8 @@
         clickAttack();
     };
 
-    contributeToggle('helperClickerSwitch', 'Auto clicker',
+    contributeToggle('helperClickerToggle', 'Auto Clicker [N]',
+        'Click attacks on routes, gyms, dungeons and temporary battles.',
         () => isClickerRunning,
         (isOn) => { isClickerRunning = isOn; });
 
@@ -453,7 +581,8 @@
         };
     };
 
-    contributeToggle('helperFrontierSwitch', 'Frontier restart',
+    contributeToggle('helperFrontierToggle', 'Frontier Restart',
+        'Starts a new Battle Frontier run when one ends in a loss.',
         () => isFrontierRestartRunning,
         (isOn) => { isFrontierRestartRunning = isOn; });
 
@@ -631,11 +760,15 @@
         return App.game.gameState === gameStates().town && !!player?.town?.dungeon;
     };
 
-    const stopCrawler = (message) => {
+    // A stop the player asked for, there and then, gets no sound.
+    const stopCrawler = (message, isFinished = false) => {
         isCrawlerRunning = false;
         shouldStopAfterCurrentRun = false;
         if (message) {
             notify(message);
+        }
+        if (isFinished) {
+            playDoneSound();
         }
         refreshPanel();
     };
@@ -645,11 +778,11 @@
     const startNextDungeonRun = () => {
         const dungeon = player.town?.dungeon;
         if (!dungeon) {
-            stopCrawler('Stopped — not standing on a dungeon');
+            stopCrawler('Stopped — not standing on a dungeon', true);
             return;
         }
         if (!DungeonRunner.canStartDungeon(dungeon)) {
-            stopCrawler(`Stopped after ${dungeonRunsAttempted} — cannot enter (tokens or requirements)`);
+            stopCrawler(`Stopped after ${dungeonRunsAttempted} — cannot enter (tokens or requirements)`, true);
             return;
         }
 
@@ -753,14 +886,14 @@
         }
 
         if (dungeonRunsAttempted >= dungeonRunsRequested) {
-            stopCrawler(`Ran ${dungeonRunsAttempted} dungeon${dungeonRunsAttempted === 1 ? '' : 's'} — ${dungeonRunsCleared} cleared`);
+            stopCrawler(`Ran ${dungeonRunsAttempted} dungeon${dungeonRunsAttempted === 1 ? '' : 's'} — ${dungeonRunsCleared} cleared`, true);
             return;
         }
 
         // The graceful stop lands here rather than mid-run, so the dungeon tokens
         // already spent on this attempt are not thrown away.
         if (shouldStopAfterCurrentRun) {
-            stopCrawler(`Stopped after ${dungeonRunsAttempted} of ${dungeonRunsRequested} — ${dungeonRunsCleared} cleared`);
+            stopCrawler(`Stopped after ${dungeonRunsAttempted} of ${dungeonRunsRequested} — ${dungeonRunsCleared} cleared`, true);
             return;
         }
 
@@ -982,6 +1115,488 @@
 
     }
 
+    /* ===================== safari         ===================== */
+    // ---------------------------------------------------------------------
+    // Safari walking
+    // ---------------------------------------------------------------------
+
+    const SAFARI_DIRECTIONS = [
+        { name: 'up', x: 0, y: -1 },
+        { name: 'down', x: 0, y: 1 },
+        { name: 'left', x: -1, y: 0 },
+        { name: 'right', x: 1, y: 0 },
+    ];
+
+    // TS `private` is erased at runtime, and nothing public exposes the player's tile.
+    const safariPlayerPosition = () => Safari.playerXY;
+
+    const isSafariWalkable = (x, y) => {
+        const row = Safari.grid?.[y];
+        return !!row && x >= 0 && x < row.length
+            && GameConstants.SAFARI_LEGAL_WALK_BLOCKS.includes(row[x])
+            && !!Safari.accessibleTiles?.[y]?.[x];
+    };
+
+    // Where a step can roll an encounter: grass, and water in the Alola pond.
+    const isSafariEncounterTile = (x, y) => {
+        const tile = Safari.grid[y][x];
+        return tile === GameConstants.SafariTile.grass
+            || GameConstants.SAFARI_WATER_BLOCKS.includes(tile);
+    };
+
+    // Encounters interrupt the trip, so grass and water cost more without being banned.
+    // Linear scan, not a heap: a few hundred tiles, searched once per tile.
+    const searchSafariMap = () => {
+        const width = Safari.grid[0].length;
+        const tileCount = width * Safari.grid.length;
+        const start = safariPlayerPosition();
+        const startIndex = start.y * width + start.x;
+
+        const distances = new Array(tileCount).fill(Infinity);
+        const previous = new Array(tileCount).fill(-1);
+        const isSettled = new Array(tileCount).fill(false);
+        distances[startIndex] = 0;
+
+        for (let settled = 0; settled < tileCount; settled++) {
+            let nearest = -1;
+            for (let index = 0; index < tileCount; index++) {
+                if (!isSettled[index] && (nearest === -1 || distances[index] < distances[nearest])) {
+                    nearest = index;
+                }
+            }
+            if (nearest === -1 || distances[nearest] === Infinity) {
+                break;
+            }
+            isSettled[nearest] = true;
+
+            const x = nearest % width;
+            const y = Math.floor(nearest / width);
+            SAFARI_DIRECTIONS.forEach((direction) => {
+                const nextX = x + direction.x;
+                const nextY = y + direction.y;
+                if (!isSafariWalkable(nextX, nextY)) {
+                    return;
+                }
+                const nextIndex = nextY * width + nextX;
+                const cost = isSafariEncounterTile(nextX, nextY) ? SAFARI_ENCOUNTER_TILE_COST : 1;
+                if (distances[nearest] + cost < distances[nextIndex]) {
+                    distances[nextIndex] = distances[nearest] + cost;
+                    previous[nextIndex] = nearest;
+                }
+            });
+        }
+
+        return { width, distances, previous, startIndex };
+    };
+
+    const firstSafariStepToward = (search, goalIndex) => {
+        let cursor = goalIndex;
+        while (search.previous[cursor] !== search.startIndex) {
+            cursor = search.previous[cursor];
+            if (cursor === -1) {
+                return null;
+            }
+        }
+        return { x: cursor % search.width, y: Math.floor(cursor / search.width) };
+    };
+
+    // Distance 0 is the player's own tile: standing still rolls nothing.
+    const nearestSafariTile = (search, tiles) => {
+        let best = null;
+        tiles.forEach((tile) => {
+            const index = tile.y * search.width + tile.x;
+            const distance = search.distances[index];
+            if (distance === Infinity || distance === 0) {
+                return;
+            }
+            if (!best || distance < best.distance) {
+                best = { index, distance };
+            }
+        });
+        return best;
+    };
+
+    const safariEncounterTiles = () => {
+        const tiles = [];
+        for (let y = 0; y < Safari.grid.length; y++) {
+            for (let x = 0; x < Safari.grid[y].length; x++) {
+                if (isSafariWalkable(x, y) && isSafariEncounterTile(x, y)) {
+                    tiles.push({ x, y });
+                }
+            }
+        }
+        return tiles;
+    };
+
+    // Inside a grass patch every neighbour ties on cost, so it keeps wandering it.
+    const pickSafariTarget = (search) => {
+        const target = nearestSafariTile(search, Safari.itemGrid())
+            ?? nearestSafariTile(search, Safari.pokemonGrid())
+            ?? nearestSafariTile(search, safariEncounterTiles());
+        return target ? target.index : null;
+    };
+
+    const safariDirectionTo = (from, to) => SAFARI_DIRECTIONS
+        .find((direction) => from.x + direction.x === to.x && from.y + direction.y === to.y);
+
+    const nextSafariDirection = () => {
+        const search = searchSafariMap();
+        const targetIndex = pickSafariTarget(search);
+        const playerPosition = safariPlayerPosition();
+        const step = targetIndex === null ? null : firstSafariStepToward(search, targetIndex);
+        if (step) {
+            return safariDirectionTo(playerPosition, step).name;
+        }
+
+        // Walled in: a step still advances the spawn timer.
+        return SAFARI_DIRECTIONS.find((candidate) => isSafariWalkable(
+            playerPosition.x + candidate.x, playerPosition.y + candidate.y))?.name ?? null;
+    };
+
+    // A held arrow key's calls: mid-walk, move() queues a turn, so the walk never pauses.
+    const holdSafariDirection = (direction) => {
+        const held = Safari.queue[0] ?? null;
+        if (held === direction) {
+            return;
+        }
+        if (direction) {
+            Safari.move(direction);
+        }
+        if (held) {
+            Safari.stop(held);
+        }
+    };
+
+    // playerXY updates as a step starts, so steering on entry beats the next step.
+    let safariSteeredTile = null;
+
+    const walkSafari = () => {
+        const position = safariPlayerPosition();
+        const tileKey = `${position.x},${position.y}`;
+        if (Safari.isMoving || Safari.walking) {
+            // Released and coasting to a stop, or this tile is already steered.
+            if (!Safari.walking || tileKey === safariSteeredTile) {
+                return;
+            }
+        }
+        safariSteeredTile = tileKey;
+        holdSafariDirection(nextSafariDirection());
+    };
+
+    // ---------------------------------------------------------------------
+    // Safari battles
+    // ---------------------------------------------------------------------
+
+    // Wiki "Catch Rate Table": base catch rate, Magic Ball none / level 5, level ranges.
+    // RR Razz then Rock, NR Nanab then Rock, R Razz alone.
+    const SAFARI_OPENER_TABLE = [
+        [3, '1-40:RR', '1-40:RR'],
+        [5, '1-40:RR', '1-40:RR'],
+        [6, '1-40:RR', '1-40:RR'],
+        [10, '1-40:RR', '1-40:RR'],
+        [15, '1-40:RR', '1-40:RR'],
+        [20, '1-40:RR', '1-40:RR'],
+        [25, '1-40:RR', '1-40:RR'],
+        [30, '1-40:RR', '1-40:RR'],
+        [35, '1-40:RR', '1-40:RR'],
+        [45, '1-40:RR', '1-40:RR'],
+        [50, '1-40:RR', '1-40:RR'],
+        [55, '1-40:RR', '1-40:RR'],
+        [60, '1-40:RR', '1-39:RR,40-40:NR'],
+        [65, '1-40:RR', '1-36:RR,37-40:NR'],
+        [70, '1-40:RR', '1-34:RR,35-40:NR'],
+        [75, '1-40:RR', '1-31:RR,32-40:NR'],
+        [80, '1-40:RR', '1-29:RR,30-40:NR'],
+        [90, '1-40:RR', '1-24:RR,25-40:NR'],
+        [100, '1-40:RR', '1-20:RR,21-40:NR'],
+        [120, '1-39:RR,40-40:NR', '1-13:RR,14-40:NR'],
+        [125, '1-36:RR,37-40:NR', '1-11:RR,12-40:NR'],
+        [127, '1-35:RR,36-40:NR', '1-11:RR,12-40:NR'],
+        [130, '1-34:RR,35-40:NR', '1-10:RR,11-40:NR'],
+        [140, '1-29:RR,30-40:NR', '1-6:RR,7-40:NR'],
+        [145, '1-27:RR,28-40:NR', '1-5:RR,6-40:NR'],
+        [150, '1-24:RR,25-40:NR', '1-4:RR,5-40:NR'],
+        [155, '1-22:RR,23-40:NR', '1-2:RR,3-40:NR'],
+        [160, '1-20:RR,21-40:NR', '1-1:RR,2-40:NR'],
+        [170, '1-16:RR,17-40:NR', '1-40:NR'],
+        [180, '1-13:RR,14-40:NR', '1-39:NR,40-40:R'],
+        [190, '1-10:RR,11-40:NR', '1-37:NR,38-40:R'],
+        [200, '1-6:RR,7-40:NR', '1-36:NR,37-40:R'],
+        [205, '1-5:RR,6-40:NR', '1-35:NR,36-40:R'],
+        [220, '1-1:RR,2-40:NR', '1-33:NR,34-40:R'],
+        [225, '1-40:NR', '1-33:NR,34-40:R'],
+        [235, '1-40:NR', '1-31:NR,32-40:R'],
+        [255, '1-37:NR,38-40:R', '1-28:NR,29-40:R'],
+    ];
+
+    const SAFARI_OPENER_STEPS = {
+        RR: ['Razz', 'rock'],
+        NR: ['Nanab', 'rock'],
+        R: ['Razz'],
+    };
+
+    // Magic Ball gives 5-10%; the table has only 0 and 10, so the nearer column wins.
+    const usesMagicBallColumn = () => {
+        try {
+            return App.game.oakItems.calculateBonus(OakItemType.Magic_Ball) >= 7.5;
+        } catch (error) {
+            return false;
+        }
+    };
+
+    const safariOpenerCode = (catchRate, level, hasMagicBall) => {
+        const row = SAFARI_OPENER_TABLE.reduce((best, candidate) =>
+            (Math.abs(candidate[0] - catchRate) < Math.abs(best[0] - catchRate) ? candidate : best));
+        const ranges = row[hasMagicBall ? 2 : 1].split(',');
+        const match = ranges.find((range) => {
+            const [low, high] = range.split(':')[0].split('-').map(Number);
+            return level >= low && level <= high;
+        }) ?? ranges[ranges.length - 1];
+        return match.split(':')[1];
+    };
+
+    // No berry, no opener: a Rock alone doubles the escape chance for nothing.
+    const safariOpenerFor = (enemy) => {
+        if (enemy.catchFactor >= 100) {
+            return [];
+        }
+        const code = safariOpenerCode(enemy.baseCatchFactor * 6, Safari.safariLevel(), usesMagicBallColumn());
+        const steps = SAFARI_OPENER_STEPS[code] ?? [];
+        const hasBerries = steps.every((step) => step === 'rock' || Number(BaitList[step].amount()) > 0);
+        return hasBerries ? [...steps] : [];
+    };
+
+    // throwBait reads the selection synchronously, so it is restored at once.
+    const throwSafariBerry = (berryName) => {
+        const previousBait = SafariBattle.selectedBait();
+        SafariBattle.selectedBait(BaitList[berryName]);
+        SafariBattle.throwBait();
+        SafariBattle.selectedBait(previousBait);
+    };
+
+    let safariPlanEnemy = null;
+    let safariPlanSteps = [];
+
+    const fightSafariBattle = () => {
+        // Every action is a long animation chain; busy() is the game's own gate.
+        if (SafariBattle.busy()) {
+            return;
+        }
+        const enemy = SafariBattle.enemy;
+        if (enemy !== safariPlanEnemy) {
+            safariPlanEnemy = enemy;
+            safariPlanSteps = safariOpenerFor(enemy);
+        }
+
+        const step = safariPlanSteps.shift();
+        if (step === 'rock') {
+            SafariBattle.throwRock();
+        } else if (step) {
+            throwSafariBerry(step);
+        } else {
+            SafariBattle.throwBall();
+        }
+    };
+
+    // ---------------------------------------------------------------------
+    // Safari crawler
+    // ---------------------------------------------------------------------
+
+    // True once a run is paid for, so its end is counted exactly once.
+    let isSafariRunOpen = false;
+    // Left mid-run: the run keeps its balls, so re-entering carries on with it.
+    let isSafariPaused = false;
+
+    // Let go of the held direction, or the player walks on into a wall.
+    const releaseSafariKeys = () => {
+        safariSteeredTile = null;
+        [...Safari.queue].forEach((direction) => Safari.stop(direction));
+    };
+
+    const stopSafari = (message, isFinished = false) => {
+        isSafariRunning = false;
+        isSafariRunOpen = false;
+        isSafariPaused = false;
+        if (typeof Safari !== 'undefined') {
+            releaseSafariKeys();
+        }
+        if (message) {
+            notify(message);
+        }
+        if (isFinished) {
+            playDoneSound();
+        }
+        refreshPanel();
+    };
+
+    const safariProgress = () => `${safariRunsCompleted} of ${safariRunsRequested} run${safariRunsRequested === 1 ? '' : 's'}`;
+
+    // From the entrance screen, or partway through a run entered by hand.
+    const isInSafariModal = () => typeof Safari !== 'undefined'
+        && App.game?.gameState === gameStates().safari;
+
+    const startSafari = () => {
+        if (!isInSafariModal()) {
+            notify('Open the Safari Zone to start auto safari');
+            return;
+        }
+        safariRunsCompleted = 0;
+        // A run already under way is taken over and counts as the first.
+        isSafariRunOpen = Safari.inProgress();
+        isSafariPaused = false;
+        isSafariRunning = true;
+        notify(`Auto safari: ${safariRunsRequested} run${safariRunsRequested === 1 ? '' : 's'}`);
+        refreshPanel();
+        safariTick();
+    };
+
+    const toggleSafari = () => {
+        if (isSafariRunning) {
+            stopSafari(`Auto safari stopped after ${safariProgress()}`);
+            return;
+        }
+        startSafari();
+    };
+
+    // gameOver clears inProgress once the last ball is spent.
+    const handleSafariProgressChanged = (isInProgress) => {
+        if (isInProgress || !isSafariRunning || !isSafariRunOpen) {
+            return;
+        }
+        isSafariRunOpen = false;
+        safariRunsCompleted++;
+        if (safariRunsCompleted >= safariRunsRequested) {
+            stopSafari(`Auto safari done — ${safariProgress()}`, true);
+            return;
+        }
+        refreshPanel();
+    };
+
+    // Pays only once the modal is fully open: load() sizes the map off its width.
+    const openNextSafariRun = () => {
+        const modal = $('#safariModal').data('bs.modal');
+        if (DisplayObservables.modalState.safariModal === 'hidden') {
+            Safari.openModal();
+            return;
+        }
+        if (!modal?._isShown || modal._isTransitioning) {
+            return;
+        }
+        if (!Safari.canPay()) {
+            stopSafari(`Auto safari stopped after ${safariProgress()} — not enough Quest Points`, true);
+            return;
+        }
+        Safari.payEntranceFee();
+        isSafariRunOpen = Safari.inProgress();
+        refreshPanel();
+    };
+
+    const safariTick = () => {
+        if (!isSafariRunning || typeof Safari === 'undefined' || !App.game) {
+            return;
+        }
+
+        if (!Safari.inProgress()) {
+            openNextSafariRun();
+            return;
+        }
+        if (App.game.gameState !== gameStates().safari) {
+            if (!isSafariPaused) {
+                isSafariPaused = true;
+                releaseSafariKeys();
+                notify('Auto safari paused — enter the Safari Zone again to carry on');
+                refreshPanel();
+            }
+            return;
+        }
+        if (isSafariPaused) {
+            isSafariPaused = false;
+            notify(`Auto safari resumed — ${Safari.balls()} balls left`);
+        }
+
+        if (Safari.inBattle()) {
+            // SafariBattle.load releases every arrow, so the walk restarts clean.
+            safariSteeredTile = null;
+            if (typeof SafariBattle !== 'undefined') {
+                fightSafariBattle();
+            }
+            return;
+        }
+
+        if (!safariPlayerPosition()) {
+            stopSafari('Auto safari stopped — cannot read the player position');
+            return;
+        }
+        walkSafari();
+    };
+
+    const subscribeSafariProgress = () => {
+        if (typeof Safari !== 'undefined') {
+            Safari.inProgress.subscribe(guardedTick('safari run ended', handleSafariProgressChanged));
+        }
+    };
+
+    // ---------------------------------------------------------------------
+    // Safari controls
+    // ---------------------------------------------------------------------
+
+    let safariControlElements = null;
+
+    // In the modal header: its static backdrop blocks the Helper card while open.
+    const insertSafariButton = () => {
+        if (safariControlElements) {
+            return true;
+        }
+        const leaveButton = document.querySelector('#safariModal .modalClose');
+        const header = leaveButton?.parentNode;
+        if (!header) {
+            return false;
+        }
+
+        const group = buildElement('div', 'd-flex align-items-center mr-2');
+        group.id = 'helperSafariControls';
+        group.style.gap = '0.375rem';
+
+        const runsInput = buildNumberInput(safariRunsRequested, 1);
+        runsInput.id = 'helperSafariRuns';
+        runsInput.title = 'Runs';
+        runsInput.addEventListener('change', () => {
+            const parsed = parseInt(runsInput.value, 10);
+            safariRunsRequested = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SAFARI_RUNS;
+            runsInput.value = String(safariRunsRequested);
+            refreshPanel();
+        });
+        group.appendChild(runsInput);
+
+        const button = buildElement('button', 'btn text-nowrap');
+        button.type = 'button';
+        button.id = 'helperSafariToggle';
+        button.title = `Hotkey: ${SAFARI_TOGGLE_KEY.toUpperCase()}`;
+        button.addEventListener('click', toggleSafari);
+        group.appendChild(button);
+
+        header.insertBefore(group, leaveButton);
+        safariControlElements = { group, runsInput, button };
+
+        // The panel refresh ran before this existed; without it, blank for 500ms.
+        refreshSafariButton();
+        return true;
+    };
+
+    function refreshSafariButton() {
+        if (!safariControlElements) {
+            return;
+        }
+        const { runsInput, button } = safariControlElements;
+
+        runsInput.style.display = isSafariRunning ? 'none' : '';
+        if (isSafariRunning) {
+            setButtonVariant(button, 'danger', `Stop auto safari (run ${Math.min(safariRunsCompleted + 1, safariRunsRequested)} of ${safariRunsRequested})`);
+        } else {
+            setButtonVariant(button, 'success', `Auto safari ${safariRunsRequested} run${safariRunsRequested === 1 ? '' : 's'}`);
+        }
+    }
+
     /* ===================== hatchery       ===================== */
     // ---------------------------------------------------------------------
     // Hatchery fill
@@ -1122,7 +1737,7 @@
             if (isHatcheryAutoFillRunning) {
                 hatcheryAutoFillTick();
             }
-            refreshHatcheryButton();
+            refreshPanel();
         });
         warningsRow.appendChild(autoFillButton);
         hatcheryAutoFillButtonElement = autoFillButton;
@@ -1225,11 +1840,12 @@
         if (event.ctrlKey || event.altKey || event.metaKey) {
             return;
         }
-        if (event.target.matches('input, textarea, [contenteditable]')) {
+        const pressedKey = event.key.toLowerCase();
+        // The runs box takes numbers only, so V there still means start.
+        const isInSafariRunsBox = event.target.id === 'helperSafariRuns' && pressedKey === SAFARI_TOGGLE_KEY;
+        if (event.target.matches('input, textarea, [contenteditable]') && !isInSafariRunsBox) {
             return;
         }
-
-        const pressedKey = event.key.toLowerCase();
         if (pressedKey === CRAWLER_TOGGLE_KEY) {
             // Inert away from a dungeon. Stopping is always allowed.
             if (!isCrawlerRunning && !isAtDungeon()) {
@@ -1242,6 +1858,17 @@
             refreshPanel();
         } else if (pressedKey === FILL_HATCHERY_KEY) {
             fillHatcheryToCapacity();
+        } else if (pressedKey === SAFARI_TOGGLE_KEY) {
+            // Only on the safari screen, entrance included.
+            if (App.game?.gameState !== gameStates().safari) {
+                return;
+            }
+            if (isInSafariRunsBox) {
+                // Blurring fires `change`, so a count still being typed is used.
+                event.preventDefault();
+                event.target.blur();
+            }
+            toggleSafari();
         }
     };
 
@@ -1261,7 +1888,8 @@
 
         // Idempotent, so a retry cannot duplicate an earlier control.
         const isEverythingInserted = insertPanel()
-            && insertHatcheryButton() && insertUndergroundSellButtons();
+            && insertHatcheryButton() && insertUndergroundSellButtons()
+            && insertSafariButton();
         if (!isEverythingInserted) {
             setTimeout(boot, 500);
             return;
@@ -1270,6 +1898,7 @@
         patchBattleLost();
         patchSortModules();
         patchDungeonLeave();
+        subscribeSafariProgress();
         DungeonRunner.dungeonFinished.subscribe(guardedTick('dungeon finished', handleDungeonFinished));
 
         const tickSource = startTicks([
@@ -1277,13 +1906,15 @@
             { label: 'dungeon crawler', interval: CRAWLER_INTERVAL_MS, run: crawlerTick },
             { label: 'panel refresh', interval: PANEL_REFRESH_INTERVAL_MS, run: refreshPanel },
             { label: 'hatchery auto-fill', interval: HATCHERY_AUTO_FILL_INTERVAL_MS, run: hatcheryAutoFillTick },
+            { label: 'auto safari', interval: SAFARI_INTERVAL_MS, run: safariTick },
         ]);
         document.addEventListener('keydown', guardedTick('hotkey', handleKeyDown));
 
         console.log(`[helper] ready (${tickSource} timers)`
             + `\n  ${CRAWLER_TOGGLE_KEY.toUpperCase()} — start/stop dungeon crawler`
             + `\n  ${CLICKER_TOGGLE_KEY.toUpperCase()} — toggle auto clicker`
-            + `\n  ${FILL_HATCHERY_KEY.toUpperCase()} — fill the hatchery and queue`);
+            + `\n  ${FILL_HATCHERY_KEY.toUpperCase()} — fill the hatchery and queue`
+            + `\n  ${SAFARI_TOGGLE_KEY.toUpperCase()} — start/stop auto safari`);
     };
 
     boot();

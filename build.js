@@ -29,6 +29,7 @@ const MODULE_ORDER = [
     'auto-clicker.js',
     'frontier-restart.js',
     'crawler.js',
+    'safari.js',
     'hatchery.js',
     'bulk-selling.js',
     'boot.js',

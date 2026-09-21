@@ -9,13 +9,19 @@
     const PANEL_REFRESH_INTERVAL_MS = 500;
     // Timed: "reached level 100" has no observable to subscribe to.
     const HATCHERY_AUTO_FILL_INTERVAL_MS = 2000;
+    // Under the 250ms safari step, so every tile is steered before it ends.
+    const SAFARI_INTERVAL_MS = 60;
 
     // Only G J N V X Y Z are unbound by the game; see its HotkeySetting block.
     const CRAWLER_TOGGLE_KEY = 'j';
     const CLICKER_TOGGLE_KEY = 'n';
     const FILL_HATCHERY_KEY = 'g';
+    const SAFARI_TOGGLE_KEY = 'v';
 
     const DEFAULT_DUNGEON_RUNS = 1;
+    const DEFAULT_SAFARI_RUNS = 1;
+    // Costlier, not banned: a long enough detour loses to crossing grass.
+    const SAFARI_ENCOUNTER_TILE_COST = 8;
 
     // Three intents, kept apart rather than blended.
     const CrawlerMode = {
@@ -47,6 +53,9 @@
     let isClickerRunning = false;
     let isFrontierRestartRunning = false;
     let isHatcheryAutoFillRunning = false;
+    let isSafariRunning = false;
+    let safariRunsRequested = DEFAULT_SAFARI_RUNS;
+    let safariRunsCompleted = 0;
     let crawlerMode = CrawlerMode.allChests;
     let dungeonRunsRequested = DEFAULT_DUNGEON_RUNS;
     // Attempts drive the stop condition; clears are only reported.
@@ -63,6 +72,86 @@
     // An unreported tier is collected rather than silently skipped.
     const UNKNOWN_CHEST_SETTING = { isEnabled: true, priority: 1 };
 
+    // ---------------------------------------------------------------------
+    // Saved preferences
+    // ---------------------------------------------------------------------
+
+    // Choices only, never a run in progress; Settings would leave keys in the save.
+    const PREFERENCES_STORAGE_KEY = 'pokeclicker-helper.preferences';
+
+    const currentPreferences = () => ({
+        isClickerRunning,
+        isFrontierRestartRunning,
+        isHatcheryAutoFillRunning,
+        crawlerMode,
+        dungeonRunsRequested,
+        safariRunsRequested,
+        chestSettings,
+    });
+
+    let lastSavedPreferences = null;
+
+    // Only writes when something changed, so the panel refresh can call it.
+    const savePreferences = () => {
+        const serialized = JSON.stringify(currentPreferences());
+        if (serialized === lastSavedPreferences) {
+            return;
+        }
+        try {
+            localStorage.setItem(PREFERENCES_STORAGE_KEY, serialized);
+            lastSavedPreferences = serialized;
+        } catch (error) {
+            // Private windows: preferences just reset next time.
+        }
+    };
+
+    const isPositiveInteger = (value) => Number.isInteger(value) && value > 0;
+
+    // Each field is checked on its own, so one bad value costs only itself.
+    const loadPreferences = () => {
+        let stored;
+        try {
+            stored = JSON.parse(localStorage.getItem(PREFERENCES_STORAGE_KEY));
+        } catch (error) {
+            return;
+        }
+        if (!stored || typeof stored !== 'object') {
+            return;
+        }
+        lastSavedPreferences = JSON.stringify(stored);
+
+        if (typeof stored.isClickerRunning === 'boolean') {
+            isClickerRunning = stored.isClickerRunning;
+        }
+        if (typeof stored.isFrontierRestartRunning === 'boolean') {
+            isFrontierRestartRunning = stored.isFrontierRestartRunning;
+        }
+        if (typeof stored.isHatcheryAutoFillRunning === 'boolean') {
+            isHatcheryAutoFillRunning = stored.isHatcheryAutoFillRunning;
+        }
+        if (Object.values(CrawlerMode).includes(stored.crawlerMode)) {
+            crawlerMode = stored.crawlerMode;
+        }
+        if (isPositiveInteger(stored.dungeonRunsRequested)) {
+            dungeonRunsRequested = stored.dungeonRunsRequested;
+        }
+        if (isPositiveInteger(stored.safariRunsRequested)) {
+            safariRunsRequested = stored.safariRunsRequested;
+        }
+        CHEST_RARITIES.forEach((rarity) => {
+            const storedChest = stored.chestSettings?.[rarity];
+            if (typeof storedChest?.isEnabled === 'boolean') {
+                chestSettings[rarity].isEnabled = storedChest.isEnabled;
+            }
+            if (Number.isFinite(storedChest?.priority) && storedChest.priority >= MINIMUM_CHEST_PRIORITY) {
+                chestSettings[rarity].priority = storedChest.priority;
+            }
+        });
+    };
+
+    // Before any card is built, so every control starts from the saved value.
+    loadPreferences();
+
 
     const tileTypes = () => GameConstants.DungeonTileType;
     const gameStates = () => GameConstants.GameState;
@@ -74,6 +163,15 @@
             type: NotificationConstants.NotificationOption.info,
             timeout: 5000,
         });
+    };
+
+    // The Dungeon Guide's sound, so the player's own setting for it applies.
+    const playDoneSound = () => {
+        try {
+            NotificationConstants.NotificationSound.General.dungeon_guide_complete.play();
+        } catch (error) {
+            // Sounds are optional; the notification still says it is done.
+        }
     };
 
     // ---------------------------------------------------------------------
@@ -98,21 +196,6 @@
         input.value = String(value);
         input.style.width = '5.5rem';
         return input;
-    };
-
-    // Bootstrap draws the track on the label, so a mismatched `for` breaks it.
-    const buildSwitch = (elementId, labelText) => {
-        const row = buildElement('div', 'custom-control custom-switch');
-        const input = buildElement('input', 'custom-control-input');
-        input.type = 'checkbox';
-        input.id = elementId;
-        const label = buildElement('label', 'custom-control-label', labelText);
-        label.setAttribute('for', elementId);
-        // The theme sizes this below the card's 15px.
-        label.style.fontSize = 'inherit';
-        row.appendChild(input);
-        row.appendChild(label);
-        return { row, input, label };
     };
 
     const buildRow = () => {
