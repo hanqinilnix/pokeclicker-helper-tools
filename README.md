@@ -2,6 +2,8 @@
 
 A Tampermonkey / Violentmonkey userscript for [PokeClicker](https://www.pokeclicker.com). Automates the grindy parts by calling the game's own classes rather than clicking the DOM.
 
+Most of it is written with the end game in mind. It assumes the resources a feature spends are effectively free — Underground tool durability that refills faster than it can be spent, Quest Points for Safari runs, dungeon tokens, a farm with berries to spare — and picks whatever is fastest rather than whatever is cheapest. Early on, when those are the things you are short of, it will happily spend them at a bad rate.
+
 ## Install
 
 Open the raw bundle and the userscript manager will offer to install it:
