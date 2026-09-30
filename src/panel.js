@@ -77,6 +77,7 @@
         `${CRAWLER_TOGGLE_KEY.toUpperCase()} - start/stop dungeon crawler`,
         `${SAFARI_TOGGLE_KEY.toUpperCase()} - start/stop auto safari (in the Safari Zone)`,
         `${CLICKER_TOGGLE_KEY.toUpperCase()} - toggle auto clicker`,
+        `${MINING_TOGGLE_KEY.toUpperCase()} - toggle auto mining`,
         `${FILL_HATCHERY_KEY.toUpperCase()} - fill the hatchery and queue`,
     ].join('<br>');
 

@@ -9,6 +9,8 @@
     const PANEL_REFRESH_INTERVAL_MS = 500;
     // Timed: "reached level 100" has no observable to subscribe to.
     const HATCHERY_AUTO_FILL_INTERVAL_MS = 2000;
+    // UndergroundController caps the mine at 20 clicks a second.
+    const MINING_INTERVAL_MS = 50;
     // Under the 250ms safari step, so every tile is steered before it ends.
     const SAFARI_INTERVAL_MS = 60;
 
@@ -17,6 +19,7 @@
     const CLICKER_TOGGLE_KEY = 'n';
     const FILL_HATCHERY_KEY = 'g';
     const SAFARI_TOGGLE_KEY = 'v';
+    const MINING_TOGGLE_KEY = 'x';
 
     const DEFAULT_DUNGEON_RUNS = 1;
     const DEFAULT_SAFARI_RUNS = 1;
@@ -53,6 +56,7 @@
     let isClickerRunning = false;
     let isFrontierRestartRunning = false;
     let isHatcheryAutoFillRunning = false;
+    let isMiningRunning = false;
     let isSafariRunning = false;
     let safariRunsRequested = DEFAULT_SAFARI_RUNS;
     let safariRunsCompleted = 0;
@@ -83,6 +87,7 @@
         isClickerRunning,
         isFrontierRestartRunning,
         isHatcheryAutoFillRunning,
+        isMiningRunning,
         crawlerMode,
         dungeonRunsRequested,
         safariRunsRequested,
@@ -128,6 +133,9 @@
         }
         if (typeof stored.isHatcheryAutoFillRunning === 'boolean') {
             isHatcheryAutoFillRunning = stored.isHatcheryAutoFillRunning;
+        }
+        if (typeof stored.isMiningRunning === 'boolean') {
+            isMiningRunning = stored.isMiningRunning;
         }
         if (Object.values(CrawlerMode).includes(stored.crawlerMode)) {
             crawlerMode = stored.crawlerMode;

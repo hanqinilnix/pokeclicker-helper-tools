@@ -252,15 +252,56 @@ const storage = new Map([[PREFERENCES_KEY, JSON.stringify({
     safariRunsRequested: -2,
 })]]);
 
+// mine fixture: 5x3 of one-layer tiles, a two-tile reward at (1,1)-(2,1)
+const makeMineTile = (layerDepth, reward) => ({
+    layerDepth,
+    reward,
+    survey: -1,
+    surveyRewardID: -1,
+});
+const makeReward = (rewardID) => ({ rewardID, undergroundItemID: 0, rewarded: false });
+const miningActions = [];
+let mineDischarges = 0;
+let mineCanDischarge = false;
+const toolDurability = { 0: 1, 1: 1, 2: 1, 3: 1 };
+const mine = {
+    width: 5,
+    height: 3,
+    grid: [],
+    completed: false,
+    timeUntilDiscovery: 0,
+    itemsBuried: 1,
+    itemsFound: 0,
+};
+const resetMine = () => {
+    const reward = makeReward(0);
+    mine.grid = Array.from({ length: 15 }, () => makeMineTile(1, undefined));
+    mine.grid[6] = makeMineTile(1, reward);
+    mine.grid[7] = makeMineTile(1, reward);
+};
+resetMine();
+const undergroundTools = {
+    selectedToolType: 0,
+    getTool: (toolType) => ({ canUseTool: () => toolDurability[toolType] > 0 }),
+    useTool: (toolType, x, y) => miningActions.push(['chisel', 'hammer', 'bomb', 'survey'][toolType] + ' ' + x + ',' + y),
+};
+const underground = {
+    canAccess: () => true,
+    mine,
+    tools: undergroundTools,
+    battery: { canDischarge: () => mineCanDischarge, discharge: () => { mineDischarges++; } },
+};
+
 const timers = [];
 const refreshHandlers = [];
 const safariHandlers = [];
+const miningHandlers = [];
 const autoFillHandlers = [];
 const context = {
     document,
     console,
     localStorage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, String(value)) },
-    setInterval: (fn, ms) => { timers.push(ms); if (ms === 500) refreshHandlers.push(fn); if (ms === 2000) autoFillHandlers.push(fn); if (ms === 60) safariHandlers.push(fn); return timers.length; },
+    setInterval: (fn, ms) => { timers.push(ms); if (ms === 500) refreshHandlers.push(fn); if (ms === 2000) autoFillHandlers.push(fn); if (ms === 60) safariHandlers.push(fn); if (ms === 50) miningHandlers.push(fn); return timers.length; },
     setTimeout: (fn, ms) => { timers.push('timeout:' + ms); return timers.length; },
     GameConstants: Object.assign({ Currency: { money: 0, questPoint: 1, dungeonToken: 2, diamond: 3 } }, GameConstants),
     DungeonRunner: {
@@ -292,6 +333,7 @@ const context = {
             party: { caughtPokemon: [] },
             wallet,
             gems,
+            underground,
             challenges: { list: { regionalAttackDebuff: { active: () => false } } },
         },
     },
@@ -322,6 +364,7 @@ const context = {
     SafariBattle,
     BaitList,
     OakItemType: { Magic_Ball: 0 },
+    UndergroundToolType: { Chisel: 0, Hammer: 1, Bomb: 2, Survey: 3 },
     DisplayObservables,
     $: jQueryShim,
     window: {},
@@ -506,16 +549,18 @@ if (!panel) {
     console.log('');
     console.log('--- panel toggles ---');
     // Poke Balls filter behaviour, laid out side by side with a line between.
-    const cells = ['helperClickerToggle', 'helperFrontierToggle'].map((id) => document.getElementById(id));
+    const cells = ['helperClickerToggle', 'helperFrontierToggle', 'helperMiningToggle'].map((id) => document.getElementById(id));
     if (cells.some((cell) => !cell)) {
         fail('toggle cells missing from the panel');
     } else {
         const description = (cell) => tooltips.get(cell.children[0])?.title ?? '';
         console.log('  ' + cells.map((cell) => cell.textContent + ' (' + toggleState(cell) + ') [' + cell.className + ']').join('  |  '));
         cells.forEach((cell) => console.log('    ' + cell.textContent + ' tooltip: "' + description(cell) + '"'));
-        if (cells[0].parentNode !== cells[1].parentNode || cells[0].parentNode.tagName !== 'TR') fail('toggles are not side by side in one row');
-        if (!cells[0].classList.contains('border-right')) fail('no dividing line after the left toggle');
-        if (cells[1].classList.contains('border-right')) fail('dividing line after the last toggle');
+        if (cells.some((cell) => cell.parentNode !== cells[0].parentNode) || cells[0].parentNode.tagName !== 'TR') fail('toggles are not side by side in one row');
+        cells.slice(0, -1).forEach((cell) => {
+            if (!cell.classList.contains('border-right')) fail('no dividing line after ' + cell.id);
+        });
+        if (cells[cells.length - 1].classList.contains('border-right')) fail('dividing line after the last toggle');
         cells.forEach((cell) => {
             if (!description(cell)) fail(cell.id + ' has no description tooltip');
             if (cell.children[0].title) fail(cell.id + ' title attribute would override the Bootstrap tooltip');
@@ -547,7 +592,7 @@ if (!panel) {
         if (helpButton.title) fail('help button title attribute would override the Bootstrap tooltip');
         if (tooltips.get(helpButton)?.html !== true) fail('help tooltip is not html, so the lines would run together');
         const keys = helpLines.map((line) => line.split(' - ')[0]);
-        if (keys.join(',') !== 'J,V,N,G') fail('expected one hotkey per line, got ' + JSON.stringify(helpLines));
+        if (keys.join(',') !== 'J,V,N,X,G') fail('expected one hotkey per line, got ' + JSON.stringify(helpLines));
         if (helpLines.some((line) => /right click/i.test(line))) fail('toggle hint still in the help tooltip');
     }
 }
@@ -1220,4 +1265,135 @@ console.log('--- safari hotkey ---');
 }
 
 console.log(failures ? failures + ' FAILURE(S) (safari hotkey)' : 'safari hotkey checks passed');
+if (failures) process.exitCode = 1;
+
+// --- auto mining ----------------------------------------------------------
+console.log('');
+console.log('--- auto mining ---');
+{
+    // The clicker shares the 50ms tick; both run, only mining acts here.
+    const miningTick = () => miningHandlers.forEach((handler) => handler());
+    const miningCell = document.getElementById('helperMiningToggle');
+    context.App.game.gameState = GameConstants.GameState.town;
+
+    if (!miningCell) {
+        fail('no auto mining toggle in the Helper card');
+    } else {
+        console.log('  toggle "' + miningCell.textContent + '" (' + toggleState(miningCell) + ')');
+
+        // Off by default: nothing happens.
+        miningTick();
+        if (miningActions.length) fail('mined while switched off');
+
+        rightClick(miningCell);
+        if (toggleState(miningCell) !== 'On') fail('right click did not turn auto mining on');
+
+        // Nothing revealed yet, so it surveys first.
+        miningTick();
+        console.log('  nothing seen      -> ' + miningActions.join(', '));
+        if (miningActions[0] !== 'survey 0,0') fail('did not survey an untouched mine: ' + miningActions.join(','));
+
+        // With a survey box up, the hammer works inside it.
+        miningActions.length = 0;
+        mine.grid[7].survey = 3;
+        mine.grid[7].surveyRewardID = 0;
+        miningTick();
+        console.log('  survey box at 2,1 -> ' + miningActions.join(', '));
+        if (!/^hammer [123],1$/.test(miningActions[0])) fail('hammer went outside the survey box: ' + miningActions.join(','));
+
+        // An exposed item is dug out before anything else, and with the tool
+        // that takes the most layers off the item itself.
+        miningActions.length = 0;
+        mine.grid[7].survey = -1;
+        mine.grid.forEach((tile) => { tile.layerDepth = 2; });
+        mine.grid[7].layerDepth = 0;
+        miningTick();
+        console.log('  one tile left     -> ' + miningActions.join(', '));
+        if (miningActions[0] !== 'chisel 1,1') fail('did not chisel the item tile still covered: ' + miningActions.join(','));
+
+        // Two of its tiles under one hammer beat the chisel's two layers on one.
+        miningActions.length = 0;
+        mine.grid[11] = makeMineTile(2, mine.grid[6].reward);
+        mine.grid[12] = makeMineTile(2, mine.grid[6].reward);
+        mine.grid[6].layerDepth = 2;
+        miningTick();
+        console.log('  two tiles left    -> ' + miningActions.join(', '));
+        if (!miningActions[0]?.startsWith('hammer')) fail('chiselled where one hammer covered both tiles: ' + miningActions.join(','));
+
+        // Surveying waits until nothing is exposed.
+        miningActions.length = 0;
+        mine.grid[3].survey = -1;
+        miningTick();
+        if (miningActions[0]?.startsWith('survey')) fail('surveyed while an item was still exposed');
+        mine.grid[11] = makeMineTile(2, undefined);
+        mine.grid[12] = makeMineTile(2, undefined);
+
+        // Chisel out of durability: the hammer digs instead.
+        miningActions.length = 0;
+        toolDurability[0] = 0;
+        miningTick();
+        console.log('  chisel worn out   -> ' + miningActions.join(', '));
+        if (!miningActions[0]?.startsWith('hammer')) fail('idled while the hammer was still usable: ' + miningActions.join(','));
+        toolDurability[0] = 1;
+
+        // Deep rock with nothing within the bomb's two layers: bomb away.
+        miningActions.length = 0;
+        mine.grid.forEach((tile) => { tile.layerDepth = 4; });
+        // Survey tool worn out, so the survey step cannot take this tick.
+        toolDurability[3] = 0;
+        miningTick();
+        console.log('  all rock deep     -> ' + miningActions.join(', '));
+        if (miningActions[0] !== 'bomb 0,0') fail('did not bomb deep rock: ' + miningActions.join(','));
+
+        // One bomb hit could finish the item now, so the bomb is off the table.
+        miningActions.length = 0;
+        mine.grid[6].layerDepth = 2;
+        mine.grid[7].layerDepth = 1;
+        miningTick();
+        console.log('  item within reach -> ' + miningActions.join(', '));
+        if (miningActions[0]?.startsWith('bomb')) fail('bombed an item it could finish: ' + miningActions.join(','));
+
+        // Its last covered tile is dug by hand, then the bomb is safe again.
+        miningActions.length = 0;
+        mine.grid[6].layerDepth = 0;
+        mine.grid[7].layerDepth = 0;
+        mine.grid[6].reward.rewarded = true;
+        miningTick();
+        console.log('  item collected    -> ' + miningActions.join(', '));
+        if (miningActions[0] !== 'bomb 0,0') fail('did not go back to bombing: ' + miningActions.join(','));
+        toolDurability[3] = 1;
+        resetMine();
+        mine.grid.forEach((tile) => { tile.layerDepth = 2; });
+
+        // A full battery is spent before digging.
+        miningActions.length = 0;
+        mineCanDischarge = true;
+        miningTick();
+        console.log('  battery full      -> discharges ' + mineDischarges + ', tools ' + miningActions.length);
+        if (mineDischarges !== 1) fail('did not discharge a full battery');
+        if (miningActions.length) fail('dug on the same tick as the discharge');
+        mineCanDischarge = false;
+
+        // Undiscovered, completed or emptied mines are left alone.
+        miningActions.length = 0;
+        mine.timeUntilDiscovery = 10;
+        miningTick();
+        mine.timeUntilDiscovery = 0;
+        mine.completed = true;
+        miningTick();
+        mine.completed = false;
+        mine.itemsFound = 1;
+        miningTick();
+        mine.itemsFound = 0;
+        console.log('  not diggable      -> tools ' + miningActions.length);
+        if (miningActions.length) fail('mined a mine that cannot be dug: ' + miningActions.join(','));
+
+        // The saved preferences carry the toggle.
+        refreshHandlers.forEach((handler) => handler());
+        if (JSON.parse(storage.get(PREFERENCES_KEY)).isMiningRunning !== true) fail('auto mining was not saved');
+        rightClick(miningCell);
+    }
+}
+
+console.log(failures ? failures + ' FAILURE(S) (auto mining)' : 'auto mining checks passed');
 if (failures) process.exitCode = 1;

@@ -34,13 +34,15 @@ It walks by holding a direction and turning as it goes, the same way a held arro
 
 **Hatchery filling** — a button in the breeding modal that queues exactly as many Pokémon as the hatchery and queue will hold, respecting your filters and sort order. Auto-fill tops it up as eggs hatch and Pokémon reach level 100.
 
+**Auto mining** — digs the Underground layer at the tools' own durability and click rate. Anything already showing is dug out first: each hit uses whichever of hammer, chisel or bomb takes the most layers off the exposed treasures themselves, so a two-tile item under one hammer beats the chisel's two layers on one tile. Only once nothing is exposed does it look for more, surveying when it can and otherwise bombing, which clears twenty layers a throw against the hammer's nine. The bomb is barred whenever every still-covered tile of some treasure is within its two layers, so the hit that finishes a treasure is always a hammer or chisel and its 7-in-8 destroy chance never applies. Discharges the Cell Battery whenever it is full, and never switches your selected tool. Runs whether the Underground window is open or not; turn the game's own restart arrow on to keep going after a layer is cleared.
+
 **Underground bulk selling** — sell every unlocked item of a value type from the Treasures tab. Sell-locked items are left alone. Diamonds report what actually landed in the wallet, bonuses included.
 
-The auto clicker and frontier restart sit side by side in the Helper card, with a line between them. They work like the Poke Balls filters: right click one (or long press on mobile) to turn it on or off, and one that is off is greyed out. Hover the `?` button on the card to see the hotkeys.
+The auto clicker, frontier restart and auto mining sit side by side in the Helper card, with a line between them. They work like the Poke Balls filters: right click one (or long press on mobile) to turn it on or off, and one that is off is greyed out. Hover the `?` button on the card to see the hotkeys.
 
-Hotkeys: `J` crawler, `V` safari crawler (only with the Safari Zone open; on the entrance screen it pays and starts), `N` auto clicker, `G` fill hatchery.
+Hotkeys: `J` crawler, `V` safari crawler (only with the Safari Zone open; on the entrance screen it pays and starts), `N` auto clicker, `X` auto mining, `G` fill hatchery.
 
-Your settings are remembered after a reload: the auto clicker, frontier restart and hatchery auto-fill toggles, the crawler mode, attempt count and chest table, and the number of safari runs. They are kept in your browser's localStorage, not in your game save. A crawler or safari run that was in progress when you reloaded does not start again.
+Your settings are remembered after a reload: the auto clicker, frontier restart, auto mining and hatchery auto-fill toggles, the crawler mode, attempt count and chest table, and the number of safari runs. They are kept in your browser's localStorage, not in your game save. A crawler or safari run that was in progress when you reloaded does not start again.
 
 ## Development
 

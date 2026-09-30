@@ -30,6 +30,7 @@ const MODULE_ORDER = [
     'frontier-restart.js',
     'crawler.js',
     'safari.js',
+    'mining.js',
     'hatchery.js',
     'bulk-selling.js',
     'boot.js',
