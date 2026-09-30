@@ -32,6 +32,7 @@ const MODULE_ORDER = [
     'safari.js',
     'mining.js',
     'hatchery.js',
+    'quests.js',
     'bulk-selling.js',
     'boot.js',
 ];

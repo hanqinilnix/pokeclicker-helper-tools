@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PokeClicker Helper
 // @namespace    https://github.com/hanqinilnix/pokeclicker-helper-tools
-// @version      1.2.0
-// @description  Dungeon crawler, safari crawler, auto mining, auto clicker and hatchery filler for PokeClicker
+// @version      1.3.0
+// @description  Dungeon crawler, safari crawler, auto mining, auto clicker, hatchery filler and quest slot unlock for PokeClicker
 // @match        https://www.pokeclicker.com/*
 // @match        https://pokeclicker.com/*
 // @grant        none
@@ -1966,6 +1966,44 @@
         }
     };
 
+    /* ===================== quests         ===================== */
+    // ---------------------------------------------------------------------
+    // Quests
+    // ---------------------------------------------------------------------
+
+    let isQuestPatchInstalled = false;
+
+    // Direct begin(): Quests.beginQuest would close the modal under hideQuestsOnFull.
+    const startAllQuests = () => {
+        const quests = App.game?.quests;
+        if (!quests?.isDailyQuestsUnlocked()) {
+            return;
+        }
+        quests.questList().forEach((quest) => {
+            if (!quest.inProgress() && !quest.isCompleted()) {
+                quest.begin();
+            }
+        });
+    };
+
+    // App.game only exists once a save is picked, so this retries from the panel tick.
+    const installQuestPatch = () => {
+        const quests = App.game?.quests;
+        if (isQuestPatchInstalled || !quests) {
+            return;
+        }
+        isQuestPatchInstalled = true;
+        // Replaces the level-based cap of GameConstants.MAX_QUEST_SLOTS; bindings reread the property.
+        quests.questSlots = ko.pureComputed(() => Math.max(1, quests.questList().length));
+        // Only a new set, not a loaded save, so a quest the player quits stays quit.
+        const originalGenerateQuestList = quests.generateQuestList.bind(quests);
+        quests.generateQuestList = (...generateArguments) => {
+            const result = originalGenerateQuestList(...generateArguments);
+            guardedTick('quest start', startAllQuests)();
+            return result;
+        };
+    };
+
     /* ===================== bulk-selling   ===================== */
     // ---------------------------------------------------------------------
     // Underground bulk selling
@@ -2114,6 +2152,7 @@
             { label: 'hatchery auto-fill', interval: HATCHERY_AUTO_FILL_INTERVAL_MS, run: hatcheryAutoFillTick },
             { label: 'auto safari', interval: SAFARI_INTERVAL_MS, run: safariTick },
             { label: 'auto mining', interval: MINING_INTERVAL_MS, run: miningTick },
+            { label: 'quest patch', interval: PANEL_REFRESH_INTERVAL_MS, run: installQuestPatch },
         ]);
         document.addEventListener('keydown', guardedTick('hotkey', handleKeyDown));
 

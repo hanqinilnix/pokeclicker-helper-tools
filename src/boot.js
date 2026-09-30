@@ -80,6 +80,7 @@
             { label: 'hatchery auto-fill', interval: HATCHERY_AUTO_FILL_INTERVAL_MS, run: hatcheryAutoFillTick },
             { label: 'auto safari', interval: SAFARI_INTERVAL_MS, run: safariTick },
             { label: 'auto mining', interval: MINING_INTERVAL_MS, run: miningTick },
+            { label: 'quest patch', interval: PANEL_REFRESH_INTERVAL_MS, run: installQuestPatch },
         ]);
         document.addEventListener('keydown', guardedTick('hotkey', handleKeyDown));
 
