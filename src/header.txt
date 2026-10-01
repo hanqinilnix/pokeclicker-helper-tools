@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PokeClicker Helper
 // @namespace    https://github.com/hanqinilnix/pokeclicker-helper-tools
-// @version      1.3.0
-// @description  Dungeon crawler, safari crawler, auto mining, auto clicker, hatchery filler and quest slot unlock for PokeClicker
+// @version      1.4.0
+// @description  Dungeon crawler, safari crawler, auto mining, auto farm, auto clicker, hatchery filler and quest automation for PokeClicker
 // @match        https://www.pokeclicker.com/*
 // @match        https://pokeclicker.com/*
 // @grant        none

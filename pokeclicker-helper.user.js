@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PokeClicker Helper
 // @namespace    https://github.com/hanqinilnix/pokeclicker-helper-tools
-// @version      1.3.0
-// @description  Dungeon crawler, safari crawler, auto mining, auto clicker, hatchery filler and quest slot unlock for PokeClicker
+// @version      1.4.0
+// @description  Dungeon crawler, safari crawler, auto mining, auto farm, auto clicker, hatchery filler and quest automation for PokeClicker
 // @match        https://www.pokeclicker.com/*
 // @match        https://pokeclicker.com/*
 // @grant        none
@@ -36,6 +36,8 @@
     const MINING_INTERVAL_MS = 50;
     // Under the 250ms safari step, so every tile is steered before it ends.
     const SAFARI_INTERVAL_MS = 60;
+    // Berries take minutes at best; this only has to beat the eye.
+    const FARM_INTERVAL_MS = 1000;
 
     // Only G J N V X Y Z are unbound by the game; see its HotkeySetting block.
     const CRAWLER_TOGGLE_KEY = 'j';
@@ -45,6 +47,8 @@
     const MINING_TOGGLE_KEY = 'x';
 
     const DEFAULT_DUNGEON_RUNS = 1;
+    // Nine spins uncover the nine Alcremie forms a sweet can produce.
+    const DEFAULT_ALCREMIE_SPINS = 9;
     const DEFAULT_SAFARI_RUNS = 1;
     // Costlier, not banned: a long enough detour loses to crossing grass.
     const SAFARI_ENCOUNTER_TILE_COST = 8;
@@ -55,6 +59,23 @@
         allChests: 'allChests',
         clearEnemies: 'clearEnemies',
     };
+
+    // What the farm is being driven towards; each picks its own layout.
+    const FarmMode = {
+        layout: 'layout',
+        farmPoints: 'farmPoints',
+        alcremie: 'alcremie',
+        mutation: 'mutation',
+    };
+
+    const FARM_MODE_LABELS = {
+        layout: 'Layout',
+        farmPoints: 'Farm Points',
+        alcremie: 'Alcremie',
+        mutation: 'Mutation',
+    };
+
+    const DEFAULT_FARM_PRESET = 'harvest';
 
     const CRAWLER_MODE_LABELS = {
         bossRush: 'Boss rush',
@@ -81,9 +102,15 @@
     let isHatcheryAutoFillRunning = false;
     let isMiningRunning = false;
     let isSafariRunning = false;
+    let isFarmRunning = false;
     let safariRunsRequested = DEFAULT_SAFARI_RUNS;
     let safariRunsCompleted = 0;
     let crawlerMode = CrawlerMode.allChests;
+    let farmMode = FarmMode.layout;
+    let farmPreset = DEFAULT_FARM_PRESET;
+    let farmTargetBerry = null;
+    let farmMutationBerry = null;
+    let alcremieSpinsWanted = DEFAULT_ALCREMIE_SPINS;
     let dungeonRunsRequested = DEFAULT_DUNGEON_RUNS;
     // Attempts drive the stop condition; clears are only reported.
     let dungeonRunsAttempted = 0;
@@ -111,7 +138,13 @@
         isFrontierRestartRunning,
         isHatcheryAutoFillRunning,
         isMiningRunning,
+        isFarmRunning,
         crawlerMode,
+        farmMode,
+        farmPreset,
+        farmTargetBerry,
+        farmMutationBerry,
+        alcremieSpinsWanted,
         dungeonRunsRequested,
         safariRunsRequested,
         chestSettings,
@@ -160,8 +193,27 @@
         if (typeof stored.isMiningRunning === 'boolean') {
             isMiningRunning = stored.isMiningRunning;
         }
+        if (typeof stored.isFarmRunning === 'boolean') {
+            isFarmRunning = stored.isFarmRunning;
+        }
         if (Object.values(CrawlerMode).includes(stored.crawlerMode)) {
             crawlerMode = stored.crawlerMode;
+        }
+        if (Object.values(FarmMode).includes(stored.farmMode)) {
+            farmMode = stored.farmMode;
+        }
+        if (typeof stored.farmPreset === 'string') {
+            farmPreset = stored.farmPreset;
+        }
+        // Berry ids, not names: validated against the game only once it is loaded.
+        if (Number.isInteger(stored.farmTargetBerry)) {
+            farmTargetBerry = stored.farmTargetBerry;
+        }
+        if (Number.isInteger(stored.farmMutationBerry)) {
+            farmMutationBerry = stored.farmMutationBerry;
+        }
+        if (isPositiveInteger(stored.alcremieSpinsWanted)) {
+            alcremieSpinsWanted = stored.alcremieSpinsWanted;
         }
         if (isPositiveInteger(stored.dungeonRunsRequested)) {
             dungeonRunsRequested = stored.dungeonRunsRequested;
@@ -227,6 +279,28 @@
         input.value = String(value);
         input.style.width = '5.5rem';
         return input;
+    };
+
+    const buildSelect = (elementId) => {
+        const select = buildElement('select', 'form-control');
+        select.id = elementId;
+        return select;
+    };
+
+    // Rebuilt only when the choices themselves change, or a refresh would throw
+    // away whatever the player had just picked.
+    const fillSelect = (select, options, selectedValue) => {
+        const signature = options.map((option) => `${option.value}:${option.label}`).join('|');
+        if (select.getAttribute('data-signature') !== signature) {
+            select.setAttribute('data-signature', signature);
+            select.textContent = '';
+            options.forEach((option) => {
+                const element = buildElement('option', null, option.label);
+                element.value = String(option.value);
+                select.appendChild(element);
+            });
+        }
+        select.value = String(selectedValue);
     };
 
     const buildRow = () => {
@@ -421,6 +495,7 @@
         refreshCrawlerControls();
         refreshHatcheryButton();
         refreshSafariButton();
+        refreshFarmTab();
         savePreferences();
     }
 
@@ -1799,6 +1874,711 @@
         () => isMiningRunning,
         (isOn) => { isMiningRunning = isOn; });
 
+    /* ===================== farm           ===================== */
+    // ---------------------------------------------------------------------
+    // Layouts
+    // ---------------------------------------------------------------------
+
+    const FARM_PLOT_COUNT = 25;
+    // The one cell the player fills in; '' keeps the plot empty.
+    const FARM_TARGET = 'T';
+
+    // The wiki's setups (wiki.pokeclicker.com/#!Farm/Setups), read left to right
+    // and top to bottom. `harvest` lists the cells the keeper picks and replants;
+    // everything else is held ripe, because its aura is the point of the setup.
+    const FARM_PRESETS = {
+        harvest: {
+            label: 'Harvest — Passho + Petaya',
+            description: 'Ten plots of the target under a Passho harvest aura. For berries that drop one or more per harvest.',
+            needsTarget: true,
+            harvest: [FARM_TARGET],
+            grid: [
+                'Petaya', 'Passho', 'Passho', 'Passho', 'Passho',
+                'T', 'T', 'T', 'T', 'T',
+                'Passho', 'Passho', 'Passho', 'Passho', 'Passho',
+                'T', 'T', 'T', 'T', 'T',
+                'Passho', 'Passho', 'Passho', 'Passho', 'Passho',
+            ],
+        },
+        growth: {
+            label: 'Growth — Wacan + 4 Lum',
+            description: 'One target in the centre under the strongest growth aura in the game. For a single slow berry.',
+            needsTarget: true,
+            harvest: [FARM_TARGET],
+            grid: [
+                '', '', 'Lum', '', '',
+                '', 'Wacan', 'Wacan', 'Wacan', '',
+                'Lum', 'Wacan', 'T', 'Wacan', 'Lum',
+                '', 'Wacan', 'Wacan', 'Wacan', '',
+                '', '', 'Lum', '', '',
+            ],
+        },
+        handoffGrowth: {
+            label: 'Handoff — Wacan phase',
+            description: 'Four targets grown under Wacan. Switch to the Passho phase before they ripen.',
+            needsTarget: true,
+            harvest: [],
+            grid: [
+                'Wacan', 'Wacan', 'Wacan', 'Wacan', 'Wacan',
+                'Wacan', 'T', 'Wacan', 'T', 'Wacan',
+                'Wacan', 'Wacan', 'Wacan', 'Wacan', 'Wacan',
+                'Wacan', 'T', 'Wacan', 'T', 'Wacan',
+                'Wacan', 'Wacan', 'Wacan', 'Wacan', 'Wacan',
+            ],
+        },
+        handoffHarvest: {
+            label: 'Handoff — Passho phase',
+            description: 'The same four targets under a harvest aura instead. For berries that drop half a berry per harvest.',
+            needsTarget: true,
+            harvest: [FARM_TARGET],
+            grid: [
+                'Passho', 'Passho', 'Passho', 'Passho', 'Passho',
+                'Passho', 'T', 'Passho', 'T', 'Passho',
+                'Passho', 'Passho', 'Passho', 'Passho', 'Passho',
+                'Passho', 'T', 'Passho', 'T', 'Passho',
+                'Passho', 'Passho', 'Passho', 'Passho', 'Passho',
+            ],
+        },
+        aura: {
+            label: 'Aura — target + 4 Lum + Petaya',
+            description: 'Twenty of the target held ripe, Lum to amplify them and Petaya to keep them alive. For Starf, Rowap or Jaboca.',
+            needsTarget: true,
+            harvest: [],
+            grid: [
+                'T', 'T', 'T', 'T', 'T',
+                'T', 'Lum', 'T', 'Lum', 'T',
+                'T', 'T', 'T', 'T', 'T',
+                'T', 'Lum', 'T', 'Lum', 'T',
+                'T', 'T', 'T', 'T', 'Petaya',
+            ],
+        },
+        eggSteps: {
+            label: 'Egg steps — Chople + Babiri + Petaya',
+            description: 'Seventeen Chople for egg steps. Babiri blocks the Chilan mutation; the free plot takes the target.',
+            needsTarget: true,
+            harvest: [],
+            grid: [
+                'Chople', 'Lum', 'Chople', 'Lum', 'Chople',
+                'Petaya', 'T', 'Chople', 'Chople', 'Chople',
+                'Chople', 'Chople', 'Chople', 'Babiri', 'Chople',
+                'Lum', 'Chople', 'Babiri', 'Lum', 'Chople',
+                'Chople', 'Chople', 'Chople', 'Chople', 'Chople',
+            ],
+        },
+        colburNonsense: {
+            label: 'Farm Points — Colbur Nonsense',
+            description: 'Colbur overtakes the Cheri, and Cheri regrows in half a minute. The fastest Farm Points in the game.',
+            needsTarget: false,
+            harvest: ['Cheri'],
+            grid: [
+                'Babiri', 'Petaya', 'Cheri', 'Cheri', 'Cheri',
+                'Payapa', 'Payapa', 'Cheri', 'Colbur', 'Cheri',
+                'Cheri', 'Cheri', 'Cheri', 'Cheri', 'Cheri',
+                'Cheri', 'Colbur', 'Cheri', 'Colbur', 'Cheri',
+                'Cheri', 'Cheri', 'Cheri', 'Cheri', 'Cheri',
+            ],
+        },
+        fill: {
+            label: 'Fill — one berry, every plot',
+            description: 'Twenty-five of the target, harvested and replanted. No aura, but nothing is spent on one either.',
+            needsTarget: true,
+            harvest: [FARM_TARGET],
+            grid: new Array(FARM_PLOT_COUNT).fill(FARM_TARGET),
+        },
+    };
+
+    const berryName = (berryType) => BerryType[berryType] ?? '?';
+    const berryData = (berryType) => BerryList[berryType];
+    const farmPlot = (index) => App.game.farming.plotList[index];
+    const isBerryUnlocked = (berryType) => !!App.game.farming.unlockedBerries[berryType]?.();
+
+    // A preset cell is either a berry the keeper plants or a plot it keeps clear.
+    const buildPresetLayout = (preset, targetBerry) => preset.grid.map((token) => {
+        if (!token) {
+            return null;
+        }
+        const berry = token === FARM_TARGET ? targetBerry : BerryType[token];
+        if (berry === undefined || berry === null) {
+            return null;
+        }
+        return { berry, harvest: preset.harvest.includes(token) };
+    });
+
+    // ---------------------------------------------------------------------
+    // Mutation layouts
+    // ---------------------------------------------------------------------
+
+    // Read off the instance rather than its class name, which a bundler can
+    // rename. A strict requirement is laid out the same way as a minimum one,
+    // since an exact neighbourhood also satisfies "at least this many".
+    const farmMutationPlan = (mutation) => {
+        // Every Evolve mutation assigns originalBerry, undefined included.
+        const isEvolve = 'originalBerry' in mutation;
+        if (isEvolve && mutation.originalBerry === undefined) {
+            return null;
+        }
+        const plan = { isEvolve, centreBerry: mutation.originalBerry };
+        if (Array.isArray(mutation.berryReqs)) {
+            return Object.assign(plan, { kind: 'list', reqs: mutation.berryReqs });
+        }
+        if (mutation.berryReqs && typeof mutation.berryReqs === 'object') {
+            return Object.assign(plan, { kind: 'counts', reqs: mutation.berryReqs });
+        }
+        if (Array.isArray(mutation.fieldBerries)) {
+            return Object.assign(plan, { kind: 'field', reqs: mutation.fieldBerries });
+        }
+        // Flavour, parasite and Oak-item mutations: no layout can be derived.
+        return null;
+    };
+
+    // The game's own adjacency, so a layout cannot disagree with what it checks.
+    const farmNeighbours = (index) => Plot.findNearPlots(index);
+
+    // undefined is still free, null must stay empty, a number is a berry.
+    const reserveMutationCentre = (grid, index, plan) => {
+        const wanted = plan.isEvolve ? plan.centreBerry : null;
+        if (grid[index] !== undefined && grid[index] !== wanted) {
+            return false;
+        }
+        grid[index] = wanted;
+        return true;
+    };
+
+    // Each requirement has to appear once; whatever is already there counts.
+    const fillListNeighbourhood = (grid, neighbours, reqs) => {
+        const present = new Set(neighbours.map((index) => grid[index]).filter((cell) => typeof cell === 'number'));
+        const missing = reqs.filter((req) => !present.has(req));
+        const free = neighbours.filter((index) => grid[index] === undefined);
+        if (free.length < missing.length) {
+            return false;
+        }
+        missing.forEach((req, offset) => { grid[free[offset]] = req; });
+        return true;
+    };
+
+    // Exact counts, so every plot left over has to stay bare for good.
+    const fillCountNeighbourhood = (grid, neighbours, reqs) => {
+        const remaining = new Map(Object.keys(reqs).map((berry) => [Number(berry), reqs[berry]]));
+        for (const index of neighbours) {
+            if (typeof grid[index] !== 'number') {
+                continue;
+            }
+            const left = remaining.get(grid[index]);
+            if (!left) {
+                return false;
+            }
+            remaining.set(grid[index], left - 1);
+        }
+        const free = neighbours.filter((index) => grid[index] === undefined);
+        const wanted = [];
+        remaining.forEach((count, berry) => { for (let n = 0; n < count; n++) wanted.push(berry); });
+        if (free.length < wanted.length) {
+            return false;
+        }
+        free.forEach((index, offset) => { grid[index] = offset < wanted.length ? wanted[offset] : null; });
+        return true;
+    };
+
+    // Every plot that can be made into a mutation site is, so each tick of the
+    // game's mutation roll gets as many chances as the farm can hold.
+    const buildNeighbourhoodLayout = (plan) => {
+        let grid = new Array(FARM_PLOT_COUNT).fill(undefined);
+        for (let centre = 0; centre < FARM_PLOT_COUNT; centre++) {
+            const attempt = grid.slice();
+            const neighbours = farmNeighbours(centre);
+            const filled = reserveMutationCentre(attempt, centre, plan)
+                && (plan.kind === 'counts'
+                    ? fillCountNeighbourhood(attempt, neighbours, plan.reqs)
+                    : fillListNeighbourhood(attempt, neighbours, plan.reqs));
+            if (filled) {
+                grid = attempt;
+            }
+        }
+        return grid;
+    };
+
+    // A field mutation counts berries anywhere in the farm and lands in an empty
+    // plot, so the only layout is "the whole order, and room left over".
+    const buildFieldLayout = (plan) => {
+        const grid = new Array(FARM_PLOT_COUNT).fill(undefined);
+        let index = 0;
+        for (const field of plan.reqs) {
+            for (let n = 0; n < field.amountRequired; n++) {
+                if (index >= FARM_PLOT_COUNT - 1) {
+                    return null;
+                }
+                grid[index++] = field.berry;
+            }
+        }
+        return grid;
+    };
+
+    // Nothing is harvested: every requirement has to be ripe at the same time.
+    const buildMutationLayout = (mutation) => {
+        const plan = farmMutationPlan(mutation);
+        if (!plan) {
+            return null;
+        }
+        const grid = plan.kind === 'field' ? buildFieldLayout(plan) : buildNeighbourhoodLayout(plan);
+        if (!grid) {
+            return null;
+        }
+        return grid.map((cell) => (typeof cell === 'number' ? { berry: cell, harvest: false } : null));
+    };
+
+    const farmMutationFor = (berryType) => App.game.farming.mutations
+        .find((mutation) => mutation.mutatedBerry === berryType && mutation.unlocked && farmMutationPlan(mutation));
+
+    // Locked berries the game would currently let us mutate into.
+    const mutatableBerries = () => App.game.farming.mutations
+        .filter((mutation) => !isBerryUnlocked(mutation.mutatedBerry) && mutation.unlocked && farmMutationPlan(mutation))
+        .map((mutation) => mutation.mutatedBerry)
+        .filter((berry, index, all) => all.indexOf(berry) === index)
+        .sort((left, right) => left - right);
+
+    // ---------------------------------------------------------------------
+    // Goals
+    // ---------------------------------------------------------------------
+
+    // Seconds to ripe, as the plot would actually grow it. The aura part is an
+    // estimate: the neighbours it reads are the ones growing there now.
+    const ripeSeconds = (berryType, plot) => {
+        const multiplier = App.game.farming.getGrowthMultiplier() * (plot?.getGrowthMultiplier() ?? 1);
+        return berryData(berryType).growthTime[3] / (multiplier || 1);
+    };
+
+    // Farm Points per second, which is what the wiki's table ranks berries by.
+    // Berries that yield less than one per harvest cannot replant themselves.
+    const bestFarmPointBerry = () => {
+        let best = null;
+        App.game.farming.unlockedBerries.forEach((isUnlocked, berryType) => {
+            const data = berryData(berryType);
+            if (!isUnlocked() || !data || data.harvestAmount < 1) {
+                return;
+            }
+            const rate = data.farmValue / data.growthTime[3];
+            if (!best || rate > best.rate) {
+                best = { berryType, rate };
+            }
+        });
+        return best?.berryType ?? null;
+    };
+
+    // Every berry the Battle Cafe charges for a spin, times the spins wanted.
+    // getPrice is private in the game's TypeScript, which erases at runtime.
+    const alcremieShortfalls = () => {
+        if (typeof BattleCafeController === 'undefined') {
+            return [];
+        }
+        const sweets = Object.keys(BattleCafeController.evolutions).map(Number);
+        const needed = new Map();
+        sweets.forEach((sweet) => {
+            (BattleCafeController.getPrice(sweet) ?? []).forEach((cost) => {
+                needed.set(cost.berry, (needed.get(cost.berry) ?? 0) + cost.amount * alcremieSpinsWanted);
+            });
+        });
+
+        const shortfalls = [];
+        needed.forEach((amount, berryType) => {
+            const short = amount - App.game.farming.berryInventory[berryType]();
+            if (short > 0) {
+                shortfalls.push({ berryType, short });
+            }
+        });
+        return shortfalls;
+    };
+
+    // The berry that takes longest to grow the rest of, not the one you are
+    // shortest of: a thousand Passho are quicker than a hundred Haban.
+    const alcremieTargetBerry = () => {
+        let worst = null;
+        alcremieShortfalls().forEach(({ berryType, short }) => {
+            const data = berryData(berryType);
+            const harvests = short / Math.max(data.harvestAmount, 0.5);
+            const seconds = harvests * data.growthTime[3];
+            if (!worst || seconds > worst.seconds) {
+                worst = { berryType, seconds };
+            }
+        });
+        return worst?.berryType ?? null;
+    };
+
+    // ---------------------------------------------------------------------
+    // The keeper
+    // ---------------------------------------------------------------------
+
+    let farmLayout = null;
+    let farmLayoutKey = '';
+    let farmLayoutStartedAt = 0;
+    let farmStatusText = 'Idle';
+
+    // Which berry each mode is currently working on, so the tab can say so.
+    const farmModeTarget = () => {
+        if (farmMode === FarmMode.farmPoints) {
+            return bestFarmPointBerry();
+        }
+        if (farmMode === FarmMode.alcremie) {
+            return alcremieTargetBerry();
+        }
+        if (farmMode === FarmMode.mutation) {
+            return farmMutationBerry;
+        }
+        return farmTargetBerry;
+    };
+
+    const farmModePreset = () => {
+        if (farmMode === FarmMode.farmPoints) {
+            return FARM_PRESETS.fill;
+        }
+        if (farmMode === FarmMode.alcremie) {
+            // Half-berry harvests need the aura more than they need the plots.
+            const target = alcremieTargetBerry();
+            return target !== null && berryData(target).harvestAmount < 1
+                ? FARM_PRESETS.handoffHarvest
+                : FARM_PRESETS.harvest;
+        }
+        return FARM_PRESETS[farmPreset] ?? FARM_PRESETS[DEFAULT_FARM_PRESET];
+    };
+
+    const buildFarmLayout = () => {
+        if (farmMode === FarmMode.mutation) {
+            const mutation = farmMutationBerry === null ? null : farmMutationFor(farmMutationBerry);
+            return mutation ? buildMutationLayout(mutation) : null;
+        }
+        const preset = farmModePreset();
+        const target = farmModeTarget();
+        if (preset.needsTarget && target === null) {
+            return null;
+        }
+        return buildPresetLayout(preset, target);
+    };
+
+    // Rebuilt only when the choice behind it changes, so the planting schedule
+    // below is not restarted every tick.
+    const farmLayoutSignature = () => [farmMode, farmPreset, farmModeTarget(), farmMutationBerry].join('|');
+
+    const ensureFarmLayout = () => {
+        const signature = farmLayoutSignature();
+        if (signature !== farmLayoutKey) {
+            farmLayoutKey = signature;
+            farmLayout = buildFarmLayout();
+            farmLayoutStartedAt = Date.now();
+        }
+        return farmLayout;
+    };
+
+    const berriesMissingFor = (layout) => {
+        const missing = new Set();
+        layout.forEach((cell, index) => {
+            const plot = farmPlot(index);
+            if (cell && plot?.isUnlocked && plot.isEmpty() && !App.game.farming.hasBerry(cell.berry)) {
+                missing.add(cell.berry);
+            }
+        });
+        return [...missing];
+    };
+
+    // Planting everything at once ripens it at staggered times, and a setup only
+    // works while all of it is ripe. Each berry waits out the difference between
+    // its own growing time and the slowest one in the layout, which is what the
+    // wiki's timing tables do by hand.
+    // A berry there is none of sets no pace: waiting on one that cannot be
+    // planted would hold up the whole layout for as long as it takes to grow.
+    const plantingDelays = (layout) => {
+        const seconds = layout.map((cell, index) => {
+            const plot = farmPlot(index);
+            const isComing = cell && (!plot.isEmpty() || App.game.farming.hasBerry(cell.berry));
+            return isComing ? ripeSeconds(cell.berry, plot) : 0;
+        });
+        const slowest = seconds.reduce((left, right) => Math.max(left, right), 0);
+        return { slowest, delays: seconds.map((value) => slowest - value) };
+    };
+
+    const applyFarmLayout = (layout, isManual) => {
+        const farming = App.game.farming;
+        const elapsed = (Date.now() - farmLayoutStartedAt) / 1000;
+        const { slowest, delays } = plantingDelays(layout);
+
+        layout.forEach((cell, index) => {
+            const plot = farming.plotList[index];
+            // Safe-locked plots are the player saying "not this one".
+            if (!plot?.isUnlocked || plot.isSafeLocked) {
+                return;
+            }
+            const isRipe = !plot.isEmpty() && plot.stage() === PlotStage.Berry;
+
+            if (!cell) {
+                // Only clear a plot the layout wants bare when asked to by hand.
+                if (isManual && isRipe) {
+                    farming.harvest(index);
+                }
+                return;
+            }
+            if (!plot.isEmpty()) {
+                // Held: the aura it emits is the whole point of the plot.
+                if (plot.berry === cell.berry && !cell.harvest) {
+                    return;
+                }
+                if (isRipe) {
+                    farming.harvest(index);
+                } else if (isManual && plot.berry !== cell.berry) {
+                    farming.shovel(index);
+                }
+                return;
+            }
+            if (!farming.hasBerry(cell.berry)) {
+                return;
+            }
+            // Past the slowest berry's own growing time the schedule is over, so
+            // a replacement goes straight in.
+            if (elapsed < slowest && elapsed < delays[index]) {
+                return;
+            }
+            farming.plant(index, cell.berry);
+        });
+    };
+
+    const stopFarm = (message, isFinished = false) => {
+        isFarmRunning = false;
+        farmStatusText = message;
+        notify(message);
+        if (isFinished) {
+            playDoneSound();
+        }
+        refreshPanel();
+    };
+
+    // True when the run is over; the layout itself follows the target, so a mode
+    // that still has work to do simply rebuilds around the next berry.
+    const isFarmGoalReached = () => {
+        if (farmMode === FarmMode.mutation) {
+            return farmMutationBerry !== null && isBerryUnlocked(farmMutationBerry);
+        }
+        if (farmMode === FarmMode.alcremie) {
+            return alcremieTargetBerry() === null;
+        }
+        return false;
+    };
+
+    const farmTick = () => {
+        if (!isFarmRunning || !App.game?.farming?.canAccess()) {
+            return;
+        }
+        if (isFarmGoalReached()) {
+            stopFarm(farmMode === FarmMode.mutation
+                ? `${berryName(farmMutationBerry)} unlocked`
+                : 'Alcremie berries stocked', true);
+            return;
+        }
+
+        const layout = ensureFarmLayout();
+        if (!layout) {
+            stopFarm('Nothing to plant — pick a berry');
+            return;
+        }
+
+        applyFarmLayout(layout, false);
+
+        const missing = berriesMissingFor(layout);
+        farmStatusText = missing.length
+            ? `Waiting for ${missing.map(berryName).join(', ')}`
+            : `Keeping ${farmModeStatus()}`;
+    };
+
+    const farmModeStatus = () => {
+        const target = farmModeTarget();
+        if (farmMode === FarmMode.mutation) {
+            return `a ${berryName(target)} mutation`;
+        }
+        if (farmMode === FarmMode.alcremie) {
+            const short = alcremieShortfalls().find((entry) => entry.berryType === target);
+            return `${berryName(target)} — ${Math.ceil(short?.short ?? 0).toLocaleString('en-US')} to go`;
+        }
+        if (farmMode === FarmMode.farmPoints) {
+            return `${berryName(target)} for Farm Points`;
+        }
+        return farmModePreset().label;
+    };
+
+    // ---------------------------------------------------------------------
+    // Farm tab
+    // ---------------------------------------------------------------------
+
+    let farmControlElements = null;
+
+    const toggleFarm = () => {
+        if (isFarmRunning) {
+            stopFarm('Auto farm stopped');
+            return;
+        }
+        // A fresh start replants on its own schedule rather than the last one's.
+        farmLayoutKey = '';
+        const layout = ensureFarmLayout();
+        if (!layout) {
+            notify('Pick a berry for the farm first');
+            return;
+        }
+        isFarmRunning = true;
+        farmStatusText = `Keeping ${farmModeStatus()}`;
+        notify(`Auto farm started — ${farmModeStatus()}`);
+        refreshPanel();
+    };
+
+    // Shovels the berries the layout does not want, which the tick never does.
+    const plantFarmLayoutNow = () => {
+        farmLayoutKey = '';
+        const layout = ensureFarmLayout();
+        if (!layout) {
+            notify('Pick a berry for the farm first');
+            return;
+        }
+        applyFarmLayout(layout, true);
+        refreshPanel();
+    };
+
+    const berryOptions = (berries) => berries.map((berryType) => ({ value: berryType, label: berryName(berryType) }));
+
+    const unlockedBerryOptions = () => berryOptions(App.game.farming.unlockedBerries
+        .map((isUnlocked, berryType) => (isUnlocked() ? berryType : null))
+        .filter((berryType) => berryType !== null));
+
+    const buildFarmTabBody = () => {
+        const body = buildElement('div', 'p-2');
+
+        const modeRow = buildRow();
+        modeRow.appendChild(buildElement('span', null, 'Goal'));
+        const modeSelect = buildSelect('helperFarmMode');
+        fillSelect(modeSelect, Object.keys(FarmMode).map((mode) => ({ value: mode, label: FARM_MODE_LABELS[mode] })), farmMode);
+        modeSelect.addEventListener('change', () => {
+            farmMode = modeSelect.value;
+            refreshPanel();
+        });
+        modeRow.appendChild(modeSelect);
+        body.appendChild(modeRow);
+
+        const presetRow = buildRow();
+        presetRow.appendChild(buildElement('span', null, 'Setup'));
+        const presetSelect = buildSelect('helperFarmPreset');
+        fillSelect(presetSelect, Object.keys(FARM_PRESETS)
+            .map((name) => ({ value: name, label: FARM_PRESETS[name].label })), farmPreset);
+        presetSelect.addEventListener('change', () => {
+            farmPreset = presetSelect.value;
+            refreshPanel();
+        });
+        presetRow.appendChild(presetSelect);
+        body.appendChild(presetRow);
+
+        const targetRow = buildRow();
+        targetRow.appendChild(buildElement('span', null, 'Berry'));
+        const targetSelect = buildSelect('helperFarmTarget');
+        targetSelect.addEventListener('change', () => {
+            const berryType = Number(targetSelect.value);
+            if (farmMode === FarmMode.mutation) {
+                farmMutationBerry = berryType;
+            } else {
+                farmTargetBerry = berryType;
+            }
+            refreshPanel();
+        });
+        targetRow.appendChild(targetSelect);
+        body.appendChild(targetRow);
+
+        const spinsRow = buildRow();
+        spinsRow.appendChild(buildElement('span', null, 'Spins per sweet'));
+        const spinsInput = buildNumberInput(alcremieSpinsWanted, 1);
+        spinsInput.id = 'helperFarmSpins';
+        spinsInput.addEventListener('change', () => {
+            const parsed = parseInt(spinsInput.value, 10);
+            alcremieSpinsWanted = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ALCREMIE_SPINS;
+            spinsInput.value = String(alcremieSpinsWanted);
+            refreshPanel();
+        });
+        spinsRow.appendChild(spinsInput);
+        body.appendChild(spinsRow);
+
+        const buttonRow = buildRow();
+        const toggleButton = buildElement('button', 'btn');
+        toggleButton.type = 'button';
+        toggleButton.id = 'helperFarmToggle';
+        toggleButton.addEventListener('click', toggleFarm);
+        buttonRow.appendChild(toggleButton);
+
+        const plantButton = buildElement('button', 'btn btn-primary', 'Plant now');
+        plantButton.type = 'button';
+        plantButton.id = 'helperFarmPlant';
+        plantButton.title = 'Applies the layout at once, shovelling berries it does not want';
+        plantButton.addEventListener('click', plantFarmLayoutNow);
+        buttonRow.appendChild(plantButton);
+        body.appendChild(buttonRow);
+
+        const status = buildElement('div', 'small');
+        status.id = 'helperFarmStatus';
+        body.appendChild(status);
+
+        farmControlElements = { modeSelect, presetRow, presetSelect, targetRow, targetSelect, spinsRow, spinsInput, toggleButton, status };
+        return body;
+    };
+
+    // The farm modal's own tab strip, with the Farm Points button pinned last.
+    const insertFarmTab = () => {
+        if (document.getElementById('helperFarmView')) {
+            return true;
+        }
+        const tabList = document.querySelector('#farmModal .nav-tabs');
+        const tabContent = document.querySelector('#farmModal .tab-content');
+        if (!tabList || !tabContent) {
+            return false;
+        }
+
+        const item = buildElement('li', 'nav-item');
+        const link = buildElement('a', 'nav-link', 'Helper');
+        link.setAttribute('data-toggle', 'tab');
+        link.setAttribute('href', '#helperFarmView');
+        item.appendChild(link);
+        tabList.insertBefore(item, tabList.children[tabList.children.length - 1]);
+
+        const pane = buildElement('div', 'tab-pane fade');
+        pane.id = 'helperFarmView';
+        pane.appendChild(buildFarmTabBody());
+        tabContent.appendChild(pane);
+
+        // The panel refresh ran before this existed; without it, blank for 500ms.
+        refreshFarmTab();
+        return true;
+    };
+
+    function refreshFarmTab() {
+        if (!farmControlElements || !App.game?.farming) {
+            return;
+        }
+        const { presetRow, presetSelect, targetRow, targetSelect, spinsRow, spinsInput, toggleButton, status } = farmControlElements;
+
+        // Only the Layout goal picks its own setup; the others choose for you.
+        presetRow.style.display = farmMode === FarmMode.layout ? '' : 'none';
+        presetSelect.value = farmPreset;
+        spinsRow.style.display = farmMode === FarmMode.alcremie ? '' : 'none';
+        spinsInput.value = String(alcremieSpinsWanted);
+
+        const isMutation = farmMode === FarmMode.mutation;
+        const needsBerry = isMutation || (farmMode === FarmMode.layout && farmModePreset().needsTarget);
+        targetRow.style.display = needsBerry ? '' : 'none';
+        if (needsBerry) {
+            const options = isMutation ? berryOptions(mutatableBerries()) : unlockedBerryOptions();
+            const selected = isMutation ? farmMutationBerry : farmTargetBerry;
+            // A saved berry the save cannot offer any more falls back to the first.
+            const fallback = options.some((option) => option.value === selected) ? selected : options[0]?.value ?? null;
+            if (isMutation) {
+                farmMutationBerry = fallback;
+            } else {
+                farmTargetBerry = fallback;
+            }
+            fillSelect(targetSelect, options.length ? options : [{ value: '', label: 'Nothing available' }], fallback ?? '');
+        }
+
+        setButtonState(toggleButton, isFarmRunning, isFarmRunning ? 'Stop' : 'Start');
+        status.textContent = isFarmRunning ? farmStatusText : (buildFarmLayout() ? farmModeStatus() : 'Nothing to plant');
+    }
+
     /* ===================== hatchery       ===================== */
     // ---------------------------------------------------------------------
     // Hatchery fill
@@ -1986,6 +2766,18 @@
         });
     };
 
+    // Through Quests.claimQuest for its Medichamite roll and the all-claimed refresh.
+    const claimQuests = (completedQuests) => {
+        const quests = App.game.quests;
+        completedQuests.forEach((quest) => {
+            // Claiming the last quest swaps in a new list mid-loop.
+            const index = quests.questList().indexOf(quest);
+            if (index !== -1 && quest.isCompleted() && !quest.claimed()) {
+                quests.claimQuest(index);
+            }
+        });
+    };
+
     // App.game only exists once a save is picked, so this retries from the panel tick.
     const installQuestPatch = () => {
         const quests = App.game?.quests;
@@ -2002,6 +2794,11 @@
             guardedTick('quest start', startAllQuests)();
             return result;
         };
+        const completedQuests = ko.pureComputed(() => quests.questList()
+            .filter((quest) => quest.isCompleted() && !quest.claimed()));
+        const guardedClaimQuests = guardedTick('quest claim', claimQuests);
+        completedQuests.subscribe(guardedClaimQuests);
+        guardedClaimQuests(completedQuests());
     };
 
     /* ===================== bulk-selling   ===================== */
@@ -2133,7 +2930,7 @@
         // Idempotent, so a retry cannot duplicate an earlier control.
         const isEverythingInserted = insertPanel()
             && insertHatcheryButton() && insertUndergroundSellButtons()
-            && insertSafariButton();
+            && insertSafariButton() && insertFarmTab();
         if (!isEverythingInserted) {
             setTimeout(boot, 500);
             return;
@@ -2152,6 +2949,7 @@
             { label: 'hatchery auto-fill', interval: HATCHERY_AUTO_FILL_INTERVAL_MS, run: hatcheryAutoFillTick },
             { label: 'auto safari', interval: SAFARI_INTERVAL_MS, run: safariTick },
             { label: 'auto mining', interval: MINING_INTERVAL_MS, run: miningTick },
+            { label: 'auto farm', interval: FARM_INTERVAL_MS, run: farmTick },
             { label: 'quest patch', interval: PANEL_REFRESH_INTERVAL_MS, run: installQuestPatch },
         ]);
         document.addEventListener('keydown', guardedTick('hotkey', handleKeyDown));

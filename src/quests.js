@@ -1,4 +1,4 @@
-// Lifts the quest slot cap and starts every quest in a new set.
+// Lifts the quest slot cap, starts every quest in a new set and claims each one done.
 
     // ---------------------------------------------------------------------
     // Quests
@@ -19,6 +19,18 @@
         });
     };
 
+    // Through Quests.claimQuest for its Medichamite roll and the all-claimed refresh.
+    const claimQuests = (completedQuests) => {
+        const quests = App.game.quests;
+        completedQuests.forEach((quest) => {
+            // Claiming the last quest swaps in a new list mid-loop.
+            const index = quests.questList().indexOf(quest);
+            if (index !== -1 && quest.isCompleted() && !quest.claimed()) {
+                quests.claimQuest(index);
+            }
+        });
+    };
+
     // App.game only exists once a save is picked, so this retries from the panel tick.
     const installQuestPatch = () => {
         const quests = App.game?.quests;
@@ -35,5 +47,10 @@
             guardedTick('quest start', startAllQuests)();
             return result;
         };
+        const completedQuests = ko.pureComputed(() => quests.questList()
+            .filter((quest) => quest.isCompleted() && !quest.claimed()));
+        const guardedClaimQuests = guardedTick('quest claim', claimQuests);
+        completedQuests.subscribe(guardedClaimQuests);
+        guardedClaimQuests(completedQuests());
     };
 
